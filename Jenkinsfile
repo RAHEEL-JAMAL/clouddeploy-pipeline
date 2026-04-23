@@ -3,8 +3,8 @@ pipeline {
 
     parameters {
         string(name: 'REPO_URL', description: 'Git Repository URL')
-        string(name: 'APP_NAME', description: 'Application Name')
-        string(name: 'BRANCH', defaultValue: '', description: 'Leave empty for auto-detect')
+        string(name: 'APP_NAME', defaultValue: '', description: 'App Name (optional - auto-generated if empty)')
+        string(name: 'BRANCH', defaultValue: '', description: 'Branch (leave empty for auto-detect)')
         string(name: 'DEPLOYMENT_ID', defaultValue: 'v1', description: 'Deployment ID')
     }
 
@@ -22,25 +22,30 @@ pipeline {
                 script {
 
                     if (!params.REPO_URL?.trim()) {
-                        error "REPO_URL is required ❌"
+                        error "❌ REPO_URL is required"
                     }
 
-                    if (!params.APP_NAME?.trim()) {
-                        error "APP_NAME is required ❌"
+                    // FIX 1: auto-generate app name if empty
+                    def rawName = params.APP_NAME?.trim()
+
+                    if (!rawName) {
+                        rawName = params.REPO_URL.tokenize('/').last().replace('.git', '')
+                        echo "⚠ APP_NAME empty → auto-generated: ${rawName}"
                     }
 
-                    // SAFE APP NAME (bulletproof)
-                    env.SAFE_APP = params.APP_NAME
+                    env.SAFE_APP = rawName
                         .toLowerCase()
                         .replaceAll(/[^a-z0-9]/, "")
 
-                    if (!env.SAFE_APP || env.SAFE_APP.trim() == "") {
-                        error "APP_NAME invalid after sanitization ❌ (use letters/numbers only)"
+                    // FIX 2: fallback if still invalid
+                    if (!env.SAFE_APP || env.SAFE_APP.length() < 2) {
+                        env.SAFE_APP = "app${System.currentTimeMillis()}"
+                        echo "⚠ Generated fallback APP_NAME: ${env.SAFE_APP}"
                     }
 
                     env.DEPLOYMENT_ID = params.DEPLOYMENT_ID ?: "v1"
 
-                    echo "SAFE APP NAME: ${env.SAFE_APP}"
+                    echo "✔ SAFE APP NAME: ${env.SAFE_APP}"
                 }
             }
         }
@@ -55,7 +60,9 @@ pipeline {
 
                         def branches = sh(
                             script: """
-                                git ls-remote --heads ${params.REPO_URL} | awk '{print \$2}' | sed 's#refs/heads/##'
+                                git ls-remote --heads ${params.REPO_URL} \
+                                | awk '{print \$2}' \
+                                | sed 's#refs/heads/##'
                             """,
                             returnStdout: true
                         ).trim()
@@ -65,24 +72,31 @@ pipeline {
                         } else if (branches.contains("master")) {
                             env.BRANCH_NAME = "master"
                         } else {
-                            env.BRANCH_NAME = branches.split("\\n")[0]
+                            env.BRANCH_NAME = branches.split("\n")[0]
+                        }
+
+                        if (!env.BRANCH_NAME) {
+                            env.BRANCH_NAME = "main"
                         }
                     }
 
-                    echo "Using branch: ${env.BRANCH_NAME}"
+                    echo "✔ Using branch: ${env.BRANCH_NAME}"
                 }
             }
         }
 
         stage('Clone Repository') {
             steps {
-                sh """
-                    rm -rf /tmp/${env.SAFE_APP}
+                script {
+                    sh """
+                        rm -rf /tmp/${env.SAFE_APP}
 
-                    git clone --depth 1 -b ${env.BRANCH_NAME} \
-                    ${params.REPO_URL} \
-                    /tmp/${env.SAFE_APP}
-                """
+                        git clone --depth 1 \
+                        -b ${env.BRANCH_NAME} \
+                        ${params.REPO_URL} \
+                        /tmp/${env.SAFE_APP}
+                    """
+                }
             }
         }
 
@@ -96,10 +110,10 @@ pipeline {
                     } else if (fileExists("${path}/requirements.txt")) {
                         env.STACK = "python"
                     } else {
-                        error "Unsupported project type ❌"
+                        error "❌ Unsupported project type"
                     }
 
-                    echo "STACK: ${env.STACK}"
+                    echo "✔ STACK: ${env.STACK}"
                 }
             }
         }
@@ -124,7 +138,7 @@ EOF
                             """
                         }
 
-                        else if (env.STACK == "python") {
+                        if (env.STACK == "python") {
                             sh """
 cat > ${path}/Dockerfile <<EOF
 FROM python:3.10
@@ -186,12 +200,19 @@ EOF
 
     post {
         success {
-            echo "Deployment SUCCESS 🚀"
+            echo "🚀 Deployment SUCCESS"
         }
 
         failure {
-            echo "Deployment FAILED ❌"
-            sh "docker logs ${env.SAFE_APP} || true"
+            echo "❌ Deployment FAILED"
+
+            sh """
+                if docker ps -a | grep -q ${env.SAFE_APP}; then
+                    docker logs ${env.SAFE_APP} || true
+                else
+                    echo "No container to show logs"
+                fi
+            """
         }
     }
 }
