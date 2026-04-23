@@ -1,15 +1,14 @@
-pipeline {
+]pipeline {
     agent any
 
     parameters {
-        string(name: 'REPO_URL', description: 'Git Repository URL', defaultValue: '')
-        string(name: 'APP_NAME', description: 'Application Name (letters/numbers only)', defaultValue: '')
-        string(name: 'BRANCH', description: 'Optional branch (leave empty for auto)', defaultValue: '')
-        string(name: 'DEPLOYMENT_ID', description: 'Version tag', defaultValue: 'v1')
+        string(name: 'REPO_URL', defaultValue: '', description: 'Git repo URL')
+        string(name: 'APP_NAME', defaultValue: 'myapp123', description: 'App name (letters/numbers only)')
+        string(name: 'BRANCH', defaultValue: '', description: 'Branch (optional)')
+        string(name: 'DEPLOYMENT_ID', defaultValue: 'v1', description: 'Version tag')
     }
 
     environment {
-        DOCKER_CREDS = credentials('dockerhub-cred')
         SAFE_APP = ""
         BRANCH_NAME = ""
         IMAGE_NAME = ""
@@ -17,65 +16,62 @@ pipeline {
 
     stages {
 
-     stage('Validate Input') {
-    steps {
-        script {
+        stage('Validate Input') {
+            steps {
+                script {
 
-            def app = (params.APP_NAME ?: "").toString().trim()
+                    echo "RAW APP_NAME: ${params.APP_NAME}"
 
-            echo "RAW APP_NAME: ${app}"
+                    // FIX 1: correct sanitization (IMPORTANT)
+                    def clean = params.APP_NAME?.toString().trim()
+                                    .replaceAll(/[^a-zA-Z0-9]/, "")
+                                    .toLowerCase()
 
-            if (!app) {
-                error "APP_NAME is empty"
-            }
+                    if (!clean || clean.length() == 0) {
+                        error "❌ APP_NAME invalid after sanitization (use only letters/numbers)"
+                    }
 
-            env.SAFE_APP = app.toLowerCase().replaceAll(/[^a-z0-9]/, "")
+                    env.SAFE_APP = clean
+                    env.DEPLOYMENT_ID = params.DEPLOYMENT_ID ?: "v1"
 
-            echo "SANITIZED APP: ${env.SAFE_APP}"
-
-            if (!env.SAFE_APP) {
-                error "APP_NAME invalid after sanitization"
+                    echo "✔ SAFE APP: ${env.SAFE_APP}"
+                }
             }
         }
-    }
-}
+
         stage('Detect Branch') {
             steps {
                 script {
 
                     if (params.BRANCH?.trim()) {
-                        env.BRANCH_NAME = params.BRANCH
+                        env.BRANCH_NAME = params.BRANCH.trim()
                     } else {
 
-                        def branches = sh(
-                            script: "git ls-remote --heads ${params.REPO_URL}",
+                        // FIX 2: proper default branch detection
+                        def branch = sh(
+                            script: """
+                                git ls-remote --heads ${params.REPO_URL} \
+                                | awk '{print \$2}' \
+                                | head -n 1 \
+                                | sed 's#refs/heads/##'
+                            """,
                             returnStdout: true
                         ).trim()
 
-                        if (branches.contains("main")) {
-                            env.BRANCH_NAME = "main"
-                        } else if (branches.contains("master")) {
-                            env.BRANCH_NAME = "master"
-                        } else {
-                            error "❌ No valid branch found (main/master missing)"
-                        }
+                        env.BRANCH_NAME = branch ?: "main"
                     }
 
-                    echo "✔ Using branch: ${env.BRANCH_NAME}"
+                    echo "✔ Branch: ${env.BRANCH_NAME}"
                 }
             }
         }
 
-        stage('Clone Repository') {
+        stage('Clone Repo') {
             steps {
                 script {
-                    sh "rm -rf /tmp/${env.SAFE_APP}"
-
                     sh """
-                        git clone --depth 1 \
-                        -b ${env.BRANCH_NAME} \
-                        ${params.REPO_URL} \
-                        /tmp/${env.SAFE_APP}
+                        rm -rf /tmp/${env.SAFE_APP}
+                        git clone --depth 1 -b ${env.BRANCH_NAME} ${params.REPO_URL} /tmp/${env.SAFE_APP}
                     """
                 }
             }
@@ -84,7 +80,6 @@ pipeline {
         stage('Detect Stack') {
             steps {
                 script {
-
                     def path = "/tmp/${env.SAFE_APP}"
 
                     if (fileExists("${path}/package.json")) {
@@ -92,47 +87,10 @@ pipeline {
                     } else if (fileExists("${path}/requirements.txt")) {
                         env.STACK = "python"
                     } else {
-                        error "❌ Unsupported project (no package.json or requirements.txt)"
+                        error "❌ Unsupported project type"
                     }
 
-                    echo "✔ STACK: ${env.STACK}"
-                }
-            }
-        }
-
-        stage('Create Dockerfile') {
-            steps {
-                script {
-
-                    def path = "/tmp/${env.SAFE_APP}"
-
-                    if (!fileExists("${path}/Dockerfile")) {
-
-                        if (env.STACK == "nodejs") {
-                            sh """
-cat > ${path}/Dockerfile <<EOF
-FROM node:20-alpine
-WORKDIR /app
-COPY . .
-RUN npm install
-EXPOSE 3000
-CMD ["npm","start"]
-EOF
-"""
-                        }
-
-                        if (env.STACK == "python") {
-                            sh """
-cat > ${path}/Dockerfile <<EOF
-FROM python:3.10
-WORKDIR /app
-COPY . .
-RUN pip install -r requirements.txt
-CMD ["python","app.py"]
-EOF
-"""
-                        }
-                    }
+                    echo "STACK: ${env.STACK}"
                 }
             }
         }
@@ -141,7 +99,7 @@ EOF
             steps {
                 script {
 
-                    env.IMAGE_NAME = "${DOCKER_CREDS_USR}/${env.SAFE_APP}:${env.DEPLOYMENT_ID}"
+                    env.IMAGE_NAME = "raheeljamal/${env.SAFE_APP}:${env.DEPLOYMENT_ID}"
 
                     sh """
                         cd /tmp/${env.SAFE_APP}
@@ -154,7 +112,7 @@ EOF
         stage('Push Image') {
             steps {
                 sh """
-                    echo "$DOCKER_CREDS_PSW" | docker login -u "$DOCKER_CREDS_USR" --password-stdin
+                    echo \$DOCKER_CREDS_PSW | docker login -u \$DOCKER_CREDS_USR --password-stdin
                     docker push ${env.IMAGE_NAME}
                 """
             }
@@ -166,9 +124,9 @@ EOF
                     docker rm -f ${env.SAFE_APP} || true
 
                     docker run -d \
-                    --name ${env.SAFE_APP} \
-                    -p 3000:3000 \
-                    ${env.IMAGE_NAME}
+                        --name ${env.SAFE_APP} \
+                        -p 3000:3000 \
+                        ${env.IMAGE_NAME}
                 """
             }
         }
@@ -186,7 +144,7 @@ EOF
         }
 
         failure {
-            echo "❌ Deployment FAILED"
+            echo "❌ Deployment FAILED (check logs above)"
         }
     }
 }
