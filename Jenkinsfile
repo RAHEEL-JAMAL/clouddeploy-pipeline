@@ -17,16 +17,16 @@ pipeline {
 
     stages {
 
-      stage('Validate Input') {
+     stage('Validate Input') {
     steps {
         script {
 
-            echo "RAW APP_NAME: ${params.APP_NAME}"
+            def app = (params.APP_NAME ?: "").toString().trim()
 
-            def app = params.APP_NAME?.trim()
+            echo "RAW APP_NAME: ${app}"
 
             if (!app) {
-                error "❌ APP_NAME is missing (check Jenkins 'Build with Parameters')"
+                error "APP_NAME is empty"
             }
 
             env.SAFE_APP = app.toLowerCase().replaceAll(/[^a-z0-9]/, "")
@@ -34,12 +34,11 @@ pipeline {
             echo "SANITIZED APP: ${env.SAFE_APP}"
 
             if (!env.SAFE_APP) {
-                error "❌ APP_NAME invalid after sanitization"
+                error "APP_NAME invalid after sanitization"
             }
         }
     }
 }
-
         stage('Detect Branch') {
             steps {
                 script {
