@@ -4,13 +4,15 @@ pipeline {
     parameters {
         string(name: 'REPO_URL', description: 'Git Repository URL')
         string(name: 'APP_NAME', description: 'Application Name')
-        string(name: 'BRANCH', defaultValue: 'main', description: 'Git Branch')
-        string(name: 'DEPLOYMENT_ID', description: 'Unique Deployment ID')
-        choice(name: 'DEPLOY_TARGET', choices: ['VM', 'AWS'], description: 'Deployment Target')
+        string(name: 'BRANCH', defaultValue: '', description: 'Leave empty for auto-detect')
+        string(name: 'DEPLOYMENT_ID', description: 'Deployment ID')
     }
 
     environment {
-        DOCKERHUB_CREDS = credentials('dockerhub-cred')
+        DOCKER_CREDS = credentials('dockerhub-cred')
+        IMAGE_NAME = ""
+        SAFE_APP = ""
+        BRANCH_NAME = ""
     }
 
     stages {
@@ -18,68 +20,63 @@ pipeline {
         stage('Prepare') {
             steps {
                 script {
-                    // ✅ sanitize app name (fix spaces + symbols)
-                    def cleanName = params.APP_NAME
-                        .toLowerCase()
-                        .replaceAll("[^a-z0-9-]", "-")
-
-                    env.APP_SAFE = cleanName
-
-                    echo "Sanitized App Name: ${env.APP_SAFE}"
+                    env.SAFE_APP = params.APP_NAME.replaceAll("[^a-zA-Z0-9]", "").toLowerCase()
+                    echo "Sanitized Name: ${env.SAFE_APP}"
                 }
             }
         }
 
-        stage('Clone Repository') {
+        stage('Detect Branch (FIXED)') {
             steps {
                 script {
-                    sh "rm -rf /tmp/${env.APP_SAFE}"
-
-                    // ✅ auto detect default branch
-                    def branch = sh(
-                        script: "git ls-remote --symref ${params.REPO_URL} HEAD | grep -o 'refs/heads/.*' | sed 's#refs/heads/##'",
-                        returnStdout: true
-                    ).trim()
-
-                    if (!branch) {
-                        branch = params.BRANCH
+                    if (params.BRANCH?.trim()) {
+                        env.BRANCH_NAME = params.BRANCH
+                    } else {
+                        env.BRANCH_NAME = sh(
+                            script: """
+                            git ls-remote --symref ${params.REPO_URL} HEAD | grep refs/heads | head -n1 | sed 's#.*/##' | tr -d '\\n'
+                            """,
+                            returnStdout: true
+                        ).trim()
                     }
 
-                    echo "Using branch: ${branch}"
-
-                    sh """
-                        git clone --depth 1 -b ${branch} ${params.REPO_URL} /tmp/${env.APP_SAFE}
-                    """
+                    echo "Using branch: ${env.BRANCH_NAME}"
                 }
+            }
+        }
+
+        stage('Clone Repo (FIXED)') {
+            steps {
+                sh """
+                    rm -rf /tmp/${env.SAFE_APP}
+
+                    git clone --depth 1 -b ${env.BRANCH_NAME} ${params.REPO_URL} /tmp/${env.SAFE_APP}
+                """
             }
         }
 
         stage('Detect Stack') {
             steps {
                 script {
-                    def path = "/tmp/${env.APP_SAFE}"
-                    def stack = "unknown"
+                    def path = "/tmp/${env.SAFE_APP}"
 
                     if (fileExists("${path}/package.json")) {
-                        stack = "nodejs"
+                        env.STACK = "nodejs"
                     } else if (fileExists("${path}/requirements.txt")) {
-                        stack = "python"
-                    } else if (fileExists("${path}/pom.xml")) {
-                        stack = "java"
-                    } else if (fileExists("${path}/Dockerfile")) {
-                        stack = "docker"
+                        env.STACK = "python"
+                    } else {
+                        error "Unsupported stack"
                     }
 
-                    env.STACK = stack
-                    echo "Detected Stack: ${stack}"
+                    echo "Stack: ${env.STACK}"
                 }
             }
         }
 
-        stage('Build Dockerfile') {
+        stage('Create Dockerfile') {
             steps {
                 script {
-                    def path = "/tmp/${env.APP_SAFE}"
+                    def path = "/tmp/${env.SAFE_APP}"
 
                     if (!fileExists("${path}/Dockerfile")) {
 
@@ -94,31 +91,19 @@ EXPOSE 3000
 CMD ["npm","start"]
 EOF
                             """
-                        } else if (env.STACK == "python") {
+                        }
+
+                        if (env.STACK == "python") {
                             sh """
 cat > ${path}/Dockerfile <<EOF
-FROM python:3.10-alpine
+FROM python:3.10
 WORKDIR /app
 COPY . .
 RUN pip install -r requirements.txt
 CMD ["python","app.py"]
 EOF
                             """
-                        } else if (env.STACK == "java") {
-                            sh """
-cat > ${path}/Dockerfile <<EOF
-FROM openjdk:17
-WORKDIR /app
-COPY . .
-CMD ["java","-jar","app.jar"]
-EOF
-                            """
-                        } else {
-                            error "Unsupported project type"
                         }
-
-                    } else {
-                        echo "Using existing Dockerfile"
                     }
                 }
             }
@@ -127,77 +112,46 @@ EOF
         stage('Build Image') {
             steps {
                 script {
-                    def IMAGE = "${DOCKERHUB_CREDS_USR}/${env.APP_SAFE}:${params.DEPLOYMENT_ID}"
-                    env.IMAGE_NAME = IMAGE
+                    env.IMAGE_NAME = "${DOCKER_CREDS_USR}/${env.SAFE_APP}:${params.DEPLOYMENT_ID}"
 
                     sh """
-                        cd /tmp/${env.APP_SAFE}
-                        docker build -t ${IMAGE} .
+                        cd /tmp/${env.SAFE_APP}
+                        docker build -t ${env.IMAGE_NAME} .
                     """
                 }
             }
         }
 
-        stage('Push to DockerHub') {
+        stage('Push Image') {
             steps {
-                script {
-                    sh """
-                        echo ${DOCKERHUB_CREDS_PSW} | docker login -u ${DOCKERHUB_CREDS_USR} --password-stdin
-                        docker push ${env.IMAGE_NAME}
-                    """
-                }
+                sh '''
+                    echo "$DOCKER_CREDS_PSW" | docker login -u "$DOCKER_CREDS_USR" --password-stdin
+                    docker push ${IMAGE_NAME}
+                '''
             }
         }
 
         stage('Deploy') {
             steps {
-                script {
+                sh """
+                    docker stop ${env.SAFE_APP} || true
+                    docker rm ${env.SAFE_APP} || true
 
-                    def port = "3000"
-
-                    if (params.DEPLOY_TARGET == "VM") {
-
-                        sh """
-docker rm -f ${env.APP_SAFE} || true
-docker pull ${env.IMAGE_NAME}
-
-docker run -d -p ${port}:3000 --name ${env.APP_SAFE} ${env.IMAGE_NAME}
-                        """
-
-                        echo "App URL: http://YOUR_VM_IP:${port}"
-
-                    } else {
-
-                        sh """
-ssh -o StrictHostKeyChecking=no ubuntu@EC2_IP '
-docker rm -f ${env.APP_SAFE} || true
-docker pull ${env.IMAGE_NAME}
-docker run -d -p 80:3000 --name ${env.APP_SAFE} ${env.IMAGE_NAME}
-'
-                        """
-                    }
-                }
+                    docker run -d -p 3000:3000 --name ${env.SAFE_APP} ${env.IMAGE_NAME}
+                """
             }
         }
 
         stage('Verify') {
             steps {
-                sh """
-                    sleep 5
-                    docker ps | grep ${env.APP_SAFE} || true
-                """
+                sh "docker ps | grep ${env.SAFE_APP} || true"
             }
         }
     }
 
     post {
-        success {
-            echo "Deployment SUCCESS 🚀"
-        }
-
         failure {
-            echo "Deployment FAILED ❌"
-            sh "docker logs ${env.APP_SAFE} || true"
+            sh "docker logs ${env.SAFE_APP} || true"
         }
     }
 }
