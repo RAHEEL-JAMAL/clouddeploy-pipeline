@@ -11,17 +11,16 @@ pipeline {
 
     environment {
         DOCKERHUB_CREDS = credentials('dockerhub-cred')
-        IMAGE_NAME = ""
     }
 
     stages {
 
         stage('Clone Repository') {
             steps {
-                sh """
-                    rm -rf /tmp/${params.APP_NAME}
-                    git clone --depth 1 -b ${params.BRANCH} ${params.REPO_URL} /tmp/${params.APP_NAME}
-                """
+                sh '''
+                    rm -rf /tmp/$APP_NAME
+                    git clone --depth 1 -b $BRANCH $REPO_URL /tmp/$APP_NAME
+                '''
             }
         }
 
@@ -55,8 +54,8 @@ pipeline {
                     if (!fileExists("${path}/Dockerfile")) {
 
                         if (env.STACK == "nodejs") {
-                            sh """
-cat > ${path}/Dockerfile <<EOF
+                            sh '''
+cat > /tmp/$APP_NAME/Dockerfile <<EOF
 FROM node:18-alpine
 WORKDIR /app
 COPY . .
@@ -64,36 +63,35 @@ RUN npm install
 EXPOSE 3000
 CMD ["npm","start"]
 EOF
-                            """
+'''
                         }
 
                         else if (env.STACK == "python") {
-                            sh """
-cat > ${path}/Dockerfile <<EOF
+                            sh '''
+cat > /tmp/$APP_NAME/Dockerfile <<EOF
 FROM python:3.10-alpine
 WORKDIR /app
 COPY . .
 RUN pip install -r requirements.txt
 CMD ["python","app.py"]
 EOF
-                            """
+'''
                         }
 
                         else if (env.STACK == "java") {
-                            sh """
-cat > ${path}/Dockerfile <<EOF
+                            sh '''
+cat > /tmp/$APP_NAME/Dockerfile <<EOF
 FROM openjdk:17
 WORKDIR /app
 COPY . .
 CMD ["java","-jar","app.jar"]
 EOF
-                            """
+'''
                         }
 
                         else {
                             error "Unsupported project type"
                         }
-
                     } else {
                         echo "Using existing Dockerfile"
                     }
@@ -106,20 +104,20 @@ EOF
                 script {
                     env.IMAGE_NAME = "${DOCKERHUB_CREDS_USR}/${params.APP_NAME}:${params.DEPLOYMENT_ID}"
 
-                    sh """
-                        cd /tmp/${params.APP_NAME}
-                        docker build -t ${env.IMAGE_NAME} .
-                    """
+                    sh '''
+                        cd /tmp/$APP_NAME
+                        docker build -t $IMAGE_NAME .
+                    '''
                 }
             }
         }
 
         stage('Push to DockerHub') {
             steps {
-                sh """
-                    echo ${DOCKERHUB_CREDS_PSW} | docker login -u ${DOCKERHUB_CREDS_USR} --password-stdin
-                    docker push ${env.IMAGE_NAME}
-                """
+                sh '''
+                    echo "$DOCKERHUB_CREDS_PSW" | docker login -u "$DOCKERHUB_CREDS_USR" --password-stdin
+                    docker push $IMAGE_NAME
+                '''
             }
         }
 
@@ -131,27 +129,23 @@ EOF
 
                     if (params.DEPLOY_TARGET == "VM") {
 
-                        sh """
-docker stop ${params.APP_NAME} || true
-docker rm ${params.APP_NAME} || true
+                        sh '''
+docker stop $APP_NAME || true
+docker rm $APP_NAME || true
 
-docker pull ${env.IMAGE_NAME}
-
-docker run -d -p ${port}:3000 --name ${params.APP_NAME} ${env.IMAGE_NAME}
-                        """
-
+docker run -d -p 3000:3000 --name $APP_NAME $IMAGE_NAME
+'''
                     } else {
 
-                        sh """
-ssh -o StrictHostKeyChecking=no ubuntu@EC2_IP '
-docker stop ${params.APP_NAME} || true
-docker rm ${params.APP_NAME} || true
+                        sh '''
+ssh -o StrictHostKeyChecking=no ubuntu@EC2_IP "
+docker stop $APP_NAME || true
+docker rm $APP_NAME || true
 
-docker pull ${env.IMAGE_NAME}
-
-docker run -d -p 80:3000 --name ${params.APP_NAME} ${env.IMAGE_NAME}
-'
-                        """
+docker pull $IMAGE_NAME
+docker run -d -p 80:3000 --name $APP_NAME $IMAGE_NAME
+"
+'''
                     }
                 }
             }
@@ -159,10 +153,9 @@ docker run -d -p 80:3000 --name ${params.APP_NAME} ${env.IMAGE_NAME}
 
         stage('Verify') {
             steps {
-                sh """
-                    sleep 5
-                    docker ps | grep ${params.APP_NAME} || true
-                """
+                sh '''
+                    docker ps | grep $APP_NAME || true
+                '''
             }
         }
     }
@@ -174,7 +167,6 @@ docker run -d -p 80:3000 --name ${params.APP_NAME} ${env.IMAGE_NAME}
 
         failure {
             echo "Deployment FAILED ❌"
-            sh "docker logs ${params.APP_NAME} || true"
         }
     }
 }
