@@ -4,15 +4,12 @@ pipeline {
     parameters {
         string(name: 'REPO_URL', defaultValue: '', description: 'Git repository URL (required)')
         string(name: 'APP_NAME', defaultValue: 'myapp', description: 'App name (letters/numbers only)')
-        string(name: 'BRANCH', defaultValue: '', description: 'Branch (optional)')
+        string(name: 'BRANCH', defaultValue: '', description: 'Optional branch')
         string(name: 'DEPLOYMENT_ID', defaultValue: 'v1', description: 'Image tag/version')
     }
 
     environment {
         DOCKER_CREDS = credentials('dockerhub-cred')
-        SAFE_APP = "myapp"
-        BRANCH_NAME = "main"
-        IMAGE_NAME = ""
     }
 
     stages {
@@ -24,21 +21,24 @@ pipeline {
                     echo "RAW APP_NAME: ${params.APP_NAME}"
 
                     if (!params.REPO_URL?.trim()) {
-                        error "❌ REPO_URL is required"
+                        error "REPO_URL is required"
                     }
 
                     def rawApp = (params.APP_NAME ?: "myapp").toString().trim()
 
-                    // FIX: never allow null
-                    def sanitized = rawApp.replaceAll(/[^a-zA-Z0-9]/, "").toLowerCase()
+                    // SAFE sanitization
+                    def safeApp = rawApp.replaceAll(/[^a-zA-Z0-9]/, "").toLowerCase()
 
-                    if (!sanitized?.trim()) {
-                        sanitized = "myapp"
+                    if (!safeApp?.trim()) {
+                        safeApp = "myapp"
                     }
 
-                    env.SAFE_APP = sanitized
+                    env.SAFE_APP = safeApp
 
-                    echo "✔ SAFE APP NAME: ${env.SAFE_APP}"
+                    // ensure never null
+                    env.SAFE_APP = env.SAFE_APP ?: "myapp"
+
+                    echo "SAFE APP NAME: ${env.SAFE_APP}"
                 }
             }
         }
@@ -47,28 +47,31 @@ pipeline {
             steps {
                 script {
 
+                    def branchName = "main"
+
                     try {
                         if (params.BRANCH?.trim()) {
-                            env.BRANCH_NAME = params.BRANCH.trim()
+                            branchName = params.BRANCH.trim()
                         } else {
-                            def branches = sh(
+                            def output = sh(
                                 script: "git ls-remote --heads ${params.REPO_URL}",
                                 returnStdout: true
                             ).trim()
 
-                            def match = branches.readLines()
-                                .find { it.contains("refs/heads/") }
+                            def match = output.readLines().find { it.contains("refs/heads/") }
 
-                            env.BRANCH_NAME = match ?
-                                match.split("refs/heads/")[1] : "main"
+                            if (match) {
+                                branchName = match.split("refs/heads/")[1]
+                            }
                         }
-
                     } catch (e) {
                         echo "⚠ Branch detection failed → using main"
-                        env.BRANCH_NAME = "main"
+                        branchName = "main"
                     }
 
-                    echo "✔ Using branch: ${env.BRANCH_NAME}"
+                    env.BRANCH_NAME = branchName ?: "main"
+
+                    echo "Using branch: ${env.BRANCH_NAME}"
                 }
             }
         }
@@ -76,14 +79,12 @@ pipeline {
         stage('Clone Repo') {
             steps {
                 script {
-                    try {
-                        sh """
-                            rm -rf /tmp/${env.SAFE_APP}
-                            git clone --depth 1 -b ${env.BRANCH_NAME} ${params.REPO_URL} /tmp/${env.SAFE_APP}
-                        """
-                    } catch (e) {
-                        error "❌ Clone failed"
-                    }
+                    def dir = "/tmp/${env.SAFE_APP}"
+
+                    sh """
+                        rm -rf ${dir}
+                        git clone --depth 1 -b ${env.BRANCH_NAME} ${params.REPO_URL} ${dir}
+                    """
                 }
             }
         }
@@ -91,6 +92,7 @@ pipeline {
         stage('Detect Stack') {
             steps {
                 script {
+
                     def path = "/tmp/${env.SAFE_APP}"
 
                     if (fileExists("${path}/package.json")) {
@@ -98,10 +100,10 @@ pipeline {
                     } else if (fileExists("${path}/requirements.txt")) {
                         env.STACK = "python"
                     } else {
-                        env.STACK = "nodejs"   // safe default
+                        env.STACK = "nodejs"
                     }
 
-                    echo "✔ STACK: ${env.STACK}"
+                    echo "STACK: ${env.STACK}"
                 }
             }
         }
@@ -109,7 +111,14 @@ pipeline {
         stage('Build Image') {
             steps {
                 script {
-                    env.IMAGE_NAME = "${DOCKER_CREDS_USR}/${env.SAFE_APP}:${params.DEPLOYMENT_ID}"
+
+                    def imageName = "${DOCKER_CREDS_USR}/${env.SAFE_APP}:${params.DEPLOYMENT_ID}"
+
+                    if (!imageName?.contains("/")) {
+                        error "Invalid image name generated"
+                    }
+
+                    env.IMAGE_NAME = imageName
 
                     sh """
                         cd /tmp/${env.SAFE_APP}
@@ -133,12 +142,15 @@ pipeline {
         stage('Deploy') {
             steps {
                 script {
+
+                    def container = env.SAFE_APP
+
                     sh """
-                        docker stop ${env.SAFE_APP} || true
-                        docker rm ${env.SAFE_APP} || true
+                        docker stop ${container} || true
+                        docker rm ${container} || true
 
                         docker run -d -p 3000:3000 \
-                        --name ${env.SAFE_APP} \
+                        --name ${container} \
                         ${env.IMAGE_NAME}
                     """
                 }
@@ -158,7 +170,7 @@ pipeline {
         }
 
         failure {
-            echo "❌ Deployment FAILED (check logs above)"
+            echo "❌ Deployment FAILED"
         }
     }
 }
