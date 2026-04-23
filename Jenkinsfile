@@ -5,7 +5,7 @@ pipeline {
         string(name: 'REPO_URL', description: 'Git Repository URL')
         string(name: 'APP_NAME', description: 'Application Name')
         string(name: 'BRANCH', defaultValue: '', description: 'Leave empty for auto-detect')
-        string(name: 'DEPLOYMENT_ID', description: 'Deployment ID (e.g. v1)')
+        string(name: 'DEPLOYMENT_ID', defaultValue: 'v1', description: 'Deployment ID')
     }
 
     environment {
@@ -29,12 +29,13 @@ pipeline {
                         error "APP_NAME is required ❌"
                     }
 
+                    // SAFE APP NAME (bulletproof)
                     env.SAFE_APP = params.APP_NAME
-                        .replaceAll("[^a-zA-Z0-9]", "")
                         .toLowerCase()
+                        .replaceAll(/[^a-z0-9]/, "")
 
-                    if (!env.SAFE_APP?.trim()) {
-                        error "APP_NAME invalid after sanitization ❌"
+                    if (!env.SAFE_APP || env.SAFE_APP.trim() == "") {
+                        error "APP_NAME invalid after sanitization ❌ (use letters/numbers only)"
                     }
 
                     env.DEPLOYMENT_ID = params.DEPLOYMENT_ID ?: "v1"
@@ -52,21 +53,19 @@ pipeline {
                         env.BRANCH_NAME = params.BRANCH
                     } else {
 
-                        def detected = sh(
+                        def branches = sh(
                             script: """
-                                git ls-remote --symref ${params.REPO_URL} HEAD \
-                                | grep refs/heads \
-                                | head -n1 \
-                                | sed 's#.*/##'
+                                git ls-remote --heads ${params.REPO_URL} | awk '{print \$2}' | sed 's#refs/heads/##'
                             """,
                             returnStdout: true
                         ).trim()
 
-                        if (!detected) {
-                            echo "Auto-detect failed → using master"
+                        if (branches.contains("main")) {
+                            env.BRANCH_NAME = "main"
+                        } else if (branches.contains("master")) {
                             env.BRANCH_NAME = "master"
                         } else {
-                            env.BRANCH_NAME = detected
+                            env.BRANCH_NAME = branches.split("\\n")[0]
                         }
                     }
 
@@ -80,8 +79,7 @@ pipeline {
                 sh """
                     rm -rf /tmp/${env.SAFE_APP}
 
-                    git clone --depth 1 \
-                    -b ${env.BRANCH_NAME} \
+                    git clone --depth 1 -b ${env.BRANCH_NAME} \
                     ${params.REPO_URL} \
                     /tmp/${env.SAFE_APP}
                 """
@@ -126,7 +124,7 @@ EOF
                             """
                         }
 
-                        if (env.STACK == "python") {
+                        else if (env.STACK == "python") {
                             sh """
 cat > ${path}/Dockerfile <<EOF
 FROM python:3.10
@@ -160,8 +158,8 @@ EOF
         stage('Push Image') {
             steps {
                 sh """
-                    echo "$DOCKER_CREDS_PSW" | docker login -u "$DOCKER_CREDS_USR" --password-stdin
-                    docker push ${IMAGE_NAME}
+                    echo "${DOCKER_CREDS_PSW}" | docker login -u "${DOCKER_CREDS_USR}" --password-stdin
+                    docker push ${env.IMAGE_NAME}
                 """
             }
         }
