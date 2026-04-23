@@ -13,35 +13,34 @@ pipeline {
         IMAGE_NAME = ""
     }
 
-   stage('Clone Repository (FINAL FIX)') {
-    steps {
-        script {
-            def path = "/tmp/${params.APP_NAME}"
-            sh "rm -rf ${path}"
+    stages {
 
-            def branchToUse = params.BRANCH
+        stage('Clone Repository') {
+            steps {
+                script {
+                    def path = "/tmp/${params.APP_NAME}"
+                    sh "rm -rf ${path}"
 
-            // ✅ CORRECT CHECK (checks output, not exit code)
-            def result = sh(
-                script: "git ls-remote --heads ${params.REPO_URL} ${params.BRANCH}",
-                returnStdout: true
-            ).trim()
+                    def branchToUse = params.BRANCH
 
-            if (result == "") {
-                echo "Branch '${params.BRANCH}' NOT found → switching to 'master'"
-                branchToUse = "master"
-            } else {
-                echo "Branch '${params.BRANCH}' exists"
+                    def result = sh(
+                        script: "git ls-remote --heads ${params.REPO_URL} ${params.BRANCH}",
+                        returnStdout: true
+                    ).trim()
+
+                    if (result == "") {
+                        echo "Branch '${params.BRANCH}' not found → using master"
+                        branchToUse = "master"
+                    }
+
+                    echo "Using branch: ${branchToUse}"
+
+                    sh """
+                        git clone --depth 1 -b ${branchToUse} ${params.REPO_URL} ${path}
+                    """
+                }
             }
-
-            echo "FINAL branch used: ${branchToUse}"
-
-            sh """
-                git clone --depth 1 -b ${branchToUse} ${params.REPO_URL} ${path}
-            """
         }
-    }
-}
 
         stage('Detect Stack') {
             steps {
@@ -65,7 +64,7 @@ pipeline {
             }
         }
 
-        stage('Build Dockerfile (if needed)') {
+        stage('Build Dockerfile') {
             steps {
                 script {
                     def path = "/tmp/${params.APP_NAME}"
@@ -83,27 +82,8 @@ EXPOSE 3000
 CMD ["npm","start"]
 EOF
 """
-                        } else if (env.STACK == "python") {
-                            sh """
-cat > ${path}/Dockerfile <<EOF
-FROM python:3.10-alpine
-WORKDIR /app
-COPY . .
-RUN pip install -r requirements.txt
-CMD ["python","app.py"]
-EOF
-"""
-                        } else if (env.STACK == "java") {
-                            sh """
-cat > ${path}/Dockerfile <<EOF
-FROM openjdk:17
-WORKDIR /app
-COPY . .
-CMD ["java","-jar","app.jar"]
-EOF
-"""
                         } else {
-                            error "Unsupported project type"
+                            error "Unsupported project"
                         }
 
                     } else {
@@ -128,7 +108,11 @@ EOF
 
         stage('Push to DockerHub') {
             steps {
-                withCredentials([usernamePassword(credentialsId: 'dockerhub-cred', usernameVariable: 'USER', passwordVariable: 'PASS')]) {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-cred',
+                    usernameVariable: 'USER',
+                    passwordVariable: 'PASS'
+                )]) {
                     sh """
                         echo $PASS | docker login -u $USER --password-stdin
                         docker tag ${env.IMAGE_NAME} $USER/${params.APP_NAME}:${params.DEPLOYMENT_ID}
@@ -140,30 +124,12 @@ EOF
 
         stage('Deploy') {
             steps {
-                script {
-                    def port = "3000"
-
-                    if (params.DEPLOY_TARGET == "VM") {
-
-                        sh """
+                sh """
 docker stop ${params.APP_NAME} || true
 docker rm ${params.APP_NAME} || true
 
-docker run -d -p ${port}:3000 --name ${params.APP_NAME} ${params.APP_NAME}:${params.DEPLOYMENT_ID}
-                        """
-
-                    } else {
-
-                        sh """
-ssh -o StrictHostKeyChecking=no ubuntu@EC2_IP '
-docker stop ${params.APP_NAME} || true
-docker rm ${params.APP_NAME} || true
-
-docker run -d -p 80:3000 --name ${params.APP_NAME} ${params.APP_NAME}:${params.DEPLOYMENT_ID}
-'
-                        """
-                    }
-                }
+docker run -d -p 3000:3000 --name ${params.APP_NAME} ${params.APP_NAME}:${params.DEPLOYMENT_ID}
+                """
             }
         }
 
@@ -181,7 +147,6 @@ docker run -d -p 80:3000 --name ${params.APP_NAME} ${params.APP_NAME}:${params.D
         success {
             echo "Deployment SUCCESS 🚀"
         }
-
         failure {
             echo "Deployment FAILED ❌"
         }
