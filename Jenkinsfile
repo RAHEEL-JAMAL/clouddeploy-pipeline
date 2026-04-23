@@ -12,7 +12,6 @@ pipeline {
     environment {
         DOCKERHUB_USERNAME = credentials('dockerhub-username')
         DOCKERHUB_PASSWORD = credentials('dockerhub-password')
-        IMAGE_NAME = "${DOCKERHUB_USERNAME}/${APP_NAME}:${DEPLOYMENT_ID}"
     }
 
     stages {
@@ -29,18 +28,23 @@ pipeline {
         stage('Detect Stack') {
             steps {
                 script {
-                    def path = "/tmp/${params.APP_NAME}"
+
+                    def path = "/tmp/${APP_NAME}"
                     def stack = "unknown"
 
                     if (fileExists("${path}/package.json")) {
                         stack = "nodejs"
-                    } else if (fileExists("${path}/requirements.txt")) {
+                    }
+                    else if (fileExists("${path}/requirements.txt")) {
                         stack = "python"
-                    } else if (fileExists("${path}/pom.xml")) {
+                    }
+                    else if (fileExists("${path}/pom.xml")) {
                         stack = "java"
-                    } else if (fileExists("${path}/go.mod")) {
+                    }
+                    else if (fileExists("${path}/go.mod")) {
                         stack = "go"
-                    } else if (fileExists("${path}/Dockerfile")) {
+                    }
+                    else if (fileExists("${path}/Dockerfile")) {
                         stack = "docker"
                     }
 
@@ -53,7 +57,8 @@ pipeline {
         stage('Build Dockerfile (if needed)') {
             steps {
                 script {
-                    def path = "/tmp/${params.APP_NAME}"
+
+                    def path = "/tmp/${APP_NAME}"
 
                     if (!fileExists("${path}/Dockerfile")) {
 
@@ -68,8 +73,9 @@ EXPOSE 3000
 CMD ["npm","start"]
 EOF
                             """
+                        }
 
-                        } else if (env.STACK == "python") {
+                        else if (env.STACK == "python") {
                             sh """
 cat > ${path}/Dockerfile <<EOF
 FROM python:3.10-alpine
@@ -79,8 +85,9 @@ RUN pip install -r requirements.txt
 CMD ["python","app.py"]
 EOF
                             """
+                        }
 
-                        } else if (env.STACK == "java") {
+                        else if (env.STACK == "java") {
                             sh """
 cat > ${path}/Dockerfile <<EOF
 FROM openjdk:17
@@ -90,6 +97,11 @@ CMD ["java","-jar","app.jar"]
 EOF
                             """
                         }
+
+                        else {
+                            error "Unsupported project type"
+                        }
+
                     } else {
                         echo "Using existing Dockerfile"
                     }
@@ -99,10 +111,14 @@ EOF
 
         stage('Build Image') {
             steps {
-                sh """
-                    cd /tmp/${APP_NAME}
-                    docker build -t ${IMAGE_NAME} .
-                """
+                script {
+                    env.IMAGE_NAME = "${DOCKERHUB_USERNAME}/${APP_NAME}:${DEPLOYMENT_ID}"
+
+                    sh """
+                        cd /tmp/${APP_NAME}
+                        docker build -t ${IMAGE_NAME} .
+                    """
+                }
             }
         }
 
@@ -119,6 +135,8 @@ EOF
             steps {
                 script {
 
+                    def port = "3000"
+
                     if (params.DEPLOY_TARGET == "VM") {
 
                         sh """
@@ -127,7 +145,7 @@ docker rm ${APP_NAME} || true
 
 docker pull ${IMAGE_NAME}
 
-docker run -d -p 3000:3000 --name ${APP_NAME} ${IMAGE_NAME}
+docker run -d -p ${port}:3000 --name ${APP_NAME} ${IMAGE_NAME}
                         """
 
                     } else {
@@ -151,7 +169,7 @@ docker run -d -p 80:3000 --name ${APP_NAME} ${IMAGE_NAME}
             steps {
                 sh """
                     sleep 5
-                    docker ps | grep ${APP_NAME}
+                    docker ps | grep ${APP_NAME} || true
                 """
             }
         }
