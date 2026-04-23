@@ -13,36 +13,35 @@ pipeline {
         IMAGE_NAME = ""
     }
 
-    stages {
+   stage('Clone Repository (FINAL FIX)') {
+    steps {
+        script {
+            def path = "/tmp/${params.APP_NAME}"
+            sh "rm -rf ${path}"
 
-        stage('Clone Repository (FIXED)') {
-            steps {
-                script {
-                    def path = "/tmp/${params.APP_NAME}"
-                    sh "rm -rf ${path}"
+            def branchToUse = params.BRANCH
 
-                    def branchToUse = params.BRANCH
+            // ✅ CORRECT CHECK (checks output, not exit code)
+            def result = sh(
+                script: "git ls-remote --heads ${params.REPO_URL} ${params.BRANCH}",
+                returnStdout: true
+            ).trim()
 
-                    // ✅ check if branch exists
-                    def exists = sh(
-                        script: "git ls-remote --heads ${params.REPO_URL} ${params.BRANCH}",
-                        returnStatus: true
-                    )
-
-                    if (exists != 0) {
-                        echo "Branch '${params.BRANCH}' not found → switching to 'master'"
-                        branchToUse = "master"
-                    }
-
-                    echo "Using branch: ${branchToUse}"
-
-                    // ✅ correct clone
-                    sh """
-                        git clone --depth 1 -b ${branchToUse} ${params.REPO_URL} ${path}
-                    """
-                }
+            if (result == "") {
+                echo "Branch '${params.BRANCH}' NOT found → switching to 'master'"
+                branchToUse = "master"
+            } else {
+                echo "Branch '${params.BRANCH}' exists"
             }
+
+            echo "FINAL branch used: ${branchToUse}"
+
+            sh """
+                git clone --depth 1 -b ${branchToUse} ${params.REPO_URL} ${path}
+            """
         }
+    }
+}
 
         stage('Detect Stack') {
             steps {
