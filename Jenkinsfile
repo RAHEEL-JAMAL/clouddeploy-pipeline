@@ -17,31 +17,28 @@ pipeline {
 
     stages {
 
-        stage('Validate Input') {
-            steps {
-                script {
+      stage('Validate Input') {
+    steps {
+        script {
 
-                    if (!params.REPO_URL?.trim()) {
-                        error "❌ REPO_URL is required"
-                    }
+            echo "RAW APP_NAME: ${params.APP_NAME}"
 
-                    if (!params.APP_NAME?.trim()) {
-                        error "❌ APP_NAME is required"
-                    }
+            def app = params.APP_NAME?.trim()
 
-                    // sanitize app name (VERY IMPORTANT FIX)
-                    env.SAFE_APP = params.APP_NAME
-                        .toLowerCase()
-                        .replaceAll(/[^a-z0-9]/, "")
+            if (!app) {
+                error "❌ APP_NAME is missing (check Jenkins 'Build with Parameters')"
+            }
 
-                    if (!env.SAFE_APP?.trim()) {
-                        error "❌ APP_NAME invalid after sanitization (use letters/numbers only)"
-                    }
+            env.SAFE_APP = app.toLowerCase().replaceAll(/[^a-z0-9]/, "")
 
-                    echo "✔ SAFE APP: ${env.SAFE_APP}"
-                }
+            echo "SANITIZED APP: ${env.SAFE_APP}"
+
+            if (!env.SAFE_APP) {
+                error "❌ APP_NAME invalid after sanitization"
             }
         }
+    }
+}
 
         stage('Detect Branch') {
             steps {
