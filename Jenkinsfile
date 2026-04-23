@@ -10,8 +10,8 @@ pipeline {
     }
 
     environment {
-        DOCKERHUB_USERNAME = credentials('dockerhub-username')
-        DOCKERHUB_PASSWORD = credentials('dockerhub-password')
+        DOCKERHUB_CREDS = credentials('dockerhub-cred')
+        IMAGE_NAME = ""
     }
 
     stages {
@@ -28,23 +28,16 @@ pipeline {
         stage('Detect Stack') {
             steps {
                 script {
-
                     def path = "/tmp/${params.APP_NAME}"
                     def stack = "unknown"
 
                     if (fileExists("${path}/package.json")) {
                         stack = "nodejs"
-                    }
-                    else if (fileExists("${path}/requirements.txt")) {
+                    } else if (fileExists("${path}/requirements.txt")) {
                         stack = "python"
-                    }
-                    else if (fileExists("${path}/pom.xml")) {
+                    } else if (fileExists("${path}/pom.xml")) {
                         stack = "java"
-                    }
-                    else if (fileExists("${path}/go.mod")) {
-                        stack = "go"
-                    }
-                    else if (fileExists("${path}/Dockerfile")) {
+                    } else if (fileExists("${path}/Dockerfile")) {
                         stack = "docker"
                     }
 
@@ -57,7 +50,6 @@ pipeline {
         stage('Build Dockerfile (if needed)') {
             steps {
                 script {
-
                     def path = "/tmp/${params.APP_NAME}"
 
                     if (!fileExists("${path}/Dockerfile")) {
@@ -112,8 +104,7 @@ EOF
         stage('Build Image') {
             steps {
                 script {
-
-                    env.IMAGE_NAME = "${env.DOCKERHUB_USERNAME}/${params.APP_NAME}:${params.DEPLOYMENT_ID}"
+                    env.IMAGE_NAME = "${DOCKERHUB_CREDS_USR}/${params.APP_NAME}:${params.DEPLOYMENT_ID}"
 
                     sh """
                         cd /tmp/${params.APP_NAME}
@@ -126,7 +117,7 @@ EOF
         stage('Push to DockerHub') {
             steps {
                 sh """
-                    echo ${DOCKERHUB_PASSWORD} | docker login -u ${DOCKERHUB_USERNAME} --password-stdin
+                    echo ${DOCKERHUB_CREDS_PSW} | docker login -u ${DOCKERHUB_CREDS_USR} --password-stdin
                     docker push ${env.IMAGE_NAME}
                 """
             }
@@ -183,10 +174,7 @@ docker run -d -p 80:3000 --name ${params.APP_NAME} ${env.IMAGE_NAME}
 
         failure {
             echo "Deployment FAILED ❌"
-
-            script {
-                sh "docker logs ${params.APP_NAME} || true"
-            }
+            sh "docker logs ${params.APP_NAME} || true"
         }
     }
 }
