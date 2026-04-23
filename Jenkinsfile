@@ -4,7 +4,10 @@ pipeline {
     parameters {
         string(name: 'REPO_URL', description: 'Git Repository URL')
         string(name: 'APP_NAME', description: 'Application Name')
-        string(name: 'BRANCH', defaultValue: 'main', description: 'Git Branch')
+
+        // default is now empty → we auto-detect main/master
+        string(name: 'BRANCH', defaultValue: '', description: 'Git Branch (optional: auto main/master)')
+
         string(name: 'DEPLOYMENT_ID', description: 'Unique Deployment ID')
         choice(name: 'DEPLOY_TARGET', choices: ['VM', 'AWS'], description: 'Deployment Target')
     }
@@ -15,18 +18,50 @@ pipeline {
 
     stages {
 
-        stage('Clone Repository') {
+        stage('Clone Repository (Auto Branch Fix)') {
             steps {
-                sh '''
-                    rm -rf /tmp/$APP_NAME
-                    git clone --depth 1 -b $BRANCH $REPO_URL /tmp/$APP_NAME
-                '''
+                script {
+
+                    def repoDir = "/tmp/${params.APP_NAME}"
+
+                    sh "rm -rf ${repoDir}"
+
+                    // 🔥 AUTO BRANCH LOGIC
+                    def branch = params.BRANCH
+
+                    if (branch == null || branch.trim() == "") {
+                        echo "No branch provided → trying main/master auto detection"
+
+                        sh """
+                            git ls-remote --heads ${params.REPO_URL} > /tmp/branches.txt
+                        """
+
+                        def branches = readFile('/tmp/branches.txt')
+
+                        if (branches.contains("refs/heads/main")) {
+                            branch = "main"
+                        } else if (branches.contains("refs/heads/master")) {
+                            branch = "master"
+                        } else {
+                            error "No main or master branch found in repo"
+                        }
+
+                        echo "Auto-selected branch: ${branch}"
+                    }
+
+                    env.SELECTED_BRANCH = branch
+
+                    sh """
+                        git clone --depth 1 -b ${branch} ${params.REPO_URL} ${repoDir}
+                    """
+                }
             }
         }
 
         stage('Detect Stack') {
             steps {
                 script {
+
                     def path = "/tmp/${params.APP_NAME}"
                     def stack = "unknown"
 
@@ -49,13 +84,14 @@ pipeline {
         stage('Build Dockerfile (if needed)') {
             steps {
                 script {
+
                     def path = "/tmp/${params.APP_NAME}"
 
                     if (!fileExists("${path}/Dockerfile")) {
 
                         if (env.STACK == "nodejs") {
-                            sh '''
-cat > /tmp/$APP_NAME/Dockerfile <<EOF
+                            sh """
+cat > ${path}/Dockerfile <<EOF
 FROM node:18-alpine
 WORKDIR /app
 COPY . .
@@ -63,37 +99,35 @@ RUN npm install
 EXPOSE 3000
 CMD ["npm","start"]
 EOF
-'''
+"""
                         }
 
                         else if (env.STACK == "python") {
-                            sh '''
-cat > /tmp/$APP_NAME/Dockerfile <<EOF
+                            sh """
+cat > ${path}/Dockerfile <<EOF
 FROM python:3.10-alpine
 WORKDIR /app
 COPY . .
 RUN pip install -r requirements.txt
 CMD ["python","app.py"]
 EOF
-'''
+"""
                         }
 
                         else if (env.STACK == "java") {
-                            sh '''
-cat > /tmp/$APP_NAME/Dockerfile <<EOF
+                            sh """
+cat > ${path}/Dockerfile <<EOF
 FROM openjdk:17
 WORKDIR /app
 COPY . .
 CMD ["java","-jar","app.jar"]
 EOF
-'''
+"""
                         }
 
                         else {
                             error "Unsupported project type"
                         }
-                    } else {
-                        echo "Using existing Dockerfile"
                     }
                 }
             }
@@ -102,12 +136,13 @@ EOF
         stage('Build Image') {
             steps {
                 script {
+
                     env.IMAGE_NAME = "${DOCKERHUB_CREDS_USR}/${params.APP_NAME}:${params.DEPLOYMENT_ID}"
 
-                    sh '''
-                        cd /tmp/$APP_NAME
-                        docker build -t $IMAGE_NAME .
-                    '''
+                    sh """
+                        cd /tmp/${params.APP_NAME}
+                        docker build -t ${env.IMAGE_NAME} .
+                    """
                 }
             }
         }
@@ -124,8 +159,6 @@ EOF
         stage('Deploy') {
             steps {
                 script {
-
-                    def port = "3000"
 
                     if (params.DEPLOY_TARGET == "VM") {
 
