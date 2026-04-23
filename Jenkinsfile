@@ -4,8 +4,8 @@ pipeline {
     parameters {
         string(name: 'REPO_URL', defaultValue: '', description: 'Git repository URL (required)')
         string(name: 'APP_NAME', defaultValue: 'myapp', description: 'App name (letters/numbers only)')
-        string(name: 'BRANCH', defaultValue: '', description: 'Optional branch (auto-detect if empty)')
-        string(name: 'DEPLOYMENT_ID', defaultValue: 'v1', description: 'Image tag')
+        string(name: 'BRANCH', defaultValue: '', description: 'Branch (optional)')
+        string(name: 'DEPLOYMENT_ID', defaultValue: 'v1', description: 'Image tag/version')
     }
 
     environment {
@@ -23,19 +23,19 @@ pipeline {
                     echo "RAW APP_NAME: ${params.APP_NAME}"
 
                     if (!params.REPO_URL?.trim()) {
-                        error "❌ REPO_URL is required"
+                        error "REPO_URL is required"
                     }
 
                     def rawApp = (params.APP_NAME ?: "myapp").trim()
 
-                    // SAFE sanitization
+                    // SAFE sanitization (prevents null)
                     env.SAFE_APP = rawApp.replaceAll(/[^a-zA-Z0-9]/, "").toLowerCase()
 
                     if (!env.SAFE_APP?.trim()) {
                         env.SAFE_APP = "myapp"
                     }
 
-                    echo "✔ SAFE APP NAME: ${env.SAFE_APP}"
+                    echo "SAFE APP NAME: ${env.SAFE_APP}"
                 }
             }
         }
@@ -58,21 +58,17 @@ pipeline {
                         env.BRANCH_NAME = branch ?: "main"
                     }
 
-                    echo "✔ Using branch: ${env.BRANCH_NAME}"
+                    echo "Using branch: ${env.BRANCH_NAME}"
                 }
             }
         }
 
-        stage('Clone Repository') {
+        stage('Clone Repo') {
             steps {
                 script {
                     sh """
                         rm -rf /tmp/${env.SAFE_APP}
-
-                        git clone --depth 1 \
-                        -b ${env.BRANCH_NAME} \
-                        ${params.REPO_URL} \
-                        /tmp/${env.SAFE_APP}
+                        git clone --depth 1 -b ${env.BRANCH_NAME} ${params.REPO_URL} /tmp/${env.SAFE_APP}
                     """
                 }
             }
