@@ -5,14 +5,14 @@ pipeline {
         string(name: 'REPO_URL', description: 'Git Repository URL')
         string(name: 'APP_NAME', description: 'Application Name')
         string(name: 'BRANCH', defaultValue: '', description: 'Leave empty for auto-detect')
-        string(name: 'DEPLOYMENT_ID', description: 'Deployment ID')
+        string(name: 'DEPLOYMENT_ID', description: 'Deployment ID (e.g. v1)')
     }
 
     environment {
         DOCKER_CREDS = credentials('dockerhub-cred')
-        IMAGE_NAME = ""
         SAFE_APP = ""
         BRANCH_NAME = ""
+        IMAGE_NAME = ""
     }
 
     stages {
@@ -20,6 +20,11 @@ pipeline {
         stage('Prepare') {
             steps {
                 script {
+
+                    if (!params.REPO_URL?.trim()) {
+                        error "REPO_URL is required ❌"
+                    }
+
                     if (!params.APP_NAME?.trim()) {
                         error "APP_NAME is required ❌"
                     }
@@ -28,11 +33,13 @@ pipeline {
                         .replaceAll("[^a-zA-Z0-9]", "")
                         .toLowerCase()
 
-                    if (!env.SAFE_APP) {
-                        error "Invalid APP_NAME after sanitization ❌"
+                    if (!env.SAFE_APP?.trim()) {
+                        error "APP_NAME invalid after sanitization ❌"
                     }
 
-                    echo "Sanitized Name: ${env.SAFE_APP}"
+                    env.DEPLOYMENT_ID = params.DEPLOYMENT_ID ?: "v1"
+
+                    echo "SAFE APP NAME: ${env.SAFE_APP}"
                 }
             }
         }
@@ -40,18 +47,23 @@ pipeline {
         stage('Detect Branch') {
             steps {
                 script {
+
                     if (params.BRANCH?.trim()) {
                         env.BRANCH_NAME = params.BRANCH
                     } else {
+
                         def detected = sh(
                             script: """
-                            git ls-remote --symref ${params.REPO_URL} HEAD | grep 'refs/heads/' | head -n1 | sed 's#.*/##'
+                                git ls-remote --symref ${params.REPO_URL} HEAD \
+                                | grep refs/heads \
+                                | head -n1 \
+                                | sed 's#.*/##'
                             """,
                             returnStdout: true
                         ).trim()
 
                         if (!detected) {
-                            echo "Auto-detect failed → fallback to master"
+                            echo "Auto-detect failed → using master"
                             env.BRANCH_NAME = "master"
                         } else {
                             env.BRANCH_NAME = detected
@@ -86,10 +98,10 @@ pipeline {
                     } else if (fileExists("${path}/requirements.txt")) {
                         env.STACK = "python"
                     } else {
-                        error "Unsupported stack ❌"
+                        error "Unsupported project type ❌"
                     }
 
-                    echo "Detected Stack: ${env.STACK}"
+                    echo "STACK: ${env.STACK}"
                 }
             }
         }
@@ -125,8 +137,6 @@ CMD ["python","app.py"]
 EOF
                             """
                         }
-                    } else {
-                        echo "Using existing Dockerfile"
                     }
                 }
             }
@@ -135,7 +145,9 @@ EOF
         stage('Build Image') {
             steps {
                 script {
-                    env.IMAGE_NAME = "${DOCKER_CREDS_USR}/${env.SAFE_APP}:${params.DEPLOYMENT_ID}"
+
+                    env.IMAGE_NAME =
+                        "${DOCKER_CREDS_USR}/${env.SAFE_APP}:${env.DEPLOYMENT_ID}"
 
                     sh """
                         cd /tmp/${env.SAFE_APP}
@@ -147,10 +159,10 @@ EOF
 
         stage('Push Image') {
             steps {
-                sh '''
+                sh """
                     echo "$DOCKER_CREDS_PSW" | docker login -u "$DOCKER_CREDS_USR" --password-stdin
                     docker push ${IMAGE_NAME}
-                '''
+                """
             }
         }
 
