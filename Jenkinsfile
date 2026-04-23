@@ -20,24 +20,42 @@ pipeline {
         stage('Prepare') {
             steps {
                 script {
-                    env.SAFE_APP = params.APP_NAME.replaceAll("[^a-zA-Z0-9]", "").toLowerCase()
+                    if (!params.APP_NAME?.trim()) {
+                        error "APP_NAME is required ❌"
+                    }
+
+                    env.SAFE_APP = params.APP_NAME
+                        .replaceAll("[^a-zA-Z0-9]", "")
+                        .toLowerCase()
+
+                    if (!env.SAFE_APP) {
+                        error "Invalid APP_NAME after sanitization ❌"
+                    }
+
                     echo "Sanitized Name: ${env.SAFE_APP}"
                 }
             }
         }
 
-        stage('Detect Branch (FIXED)') {
+        stage('Detect Branch') {
             steps {
                 script {
                     if (params.BRANCH?.trim()) {
                         env.BRANCH_NAME = params.BRANCH
                     } else {
-                        env.BRANCH_NAME = sh(
+                        def detected = sh(
                             script: """
-                            git ls-remote --symref ${params.REPO_URL} HEAD | grep refs/heads | head -n1 | sed 's#.*/##' | tr -d '\\n'
+                            git ls-remote --symref ${params.REPO_URL} HEAD | grep 'refs/heads/' | head -n1 | sed 's#.*/##'
                             """,
                             returnStdout: true
                         ).trim()
+
+                        if (!detected) {
+                            echo "Auto-detect failed → fallback to master"
+                            env.BRANCH_NAME = "master"
+                        } else {
+                            env.BRANCH_NAME = detected
+                        }
                     }
 
                     echo "Using branch: ${env.BRANCH_NAME}"
@@ -45,12 +63,15 @@ pipeline {
             }
         }
 
-        stage('Clone Repo (FIXED)') {
+        stage('Clone Repository') {
             steps {
                 sh """
                     rm -rf /tmp/${env.SAFE_APP}
 
-                    git clone --depth 1 -b ${env.BRANCH_NAME} ${params.REPO_URL} /tmp/${env.SAFE_APP}
+                    git clone --depth 1 \
+                    -b ${env.BRANCH_NAME} \
+                    ${params.REPO_URL} \
+                    /tmp/${env.SAFE_APP}
                 """
             }
         }
@@ -65,10 +86,10 @@ pipeline {
                     } else if (fileExists("${path}/requirements.txt")) {
                         env.STACK = "python"
                     } else {
-                        error "Unsupported stack"
+                        error "Unsupported stack ❌"
                     }
 
-                    echo "Stack: ${env.STACK}"
+                    echo "Detected Stack: ${env.STACK}"
                 }
             }
         }
@@ -104,6 +125,8 @@ CMD ["python","app.py"]
 EOF
                             """
                         }
+                    } else {
+                        echo "Using existing Dockerfile"
                     }
                 }
             }
@@ -137,7 +160,9 @@ EOF
                     docker stop ${env.SAFE_APP} || true
                     docker rm ${env.SAFE_APP} || true
 
-                    docker run -d -p 3000:3000 --name ${env.SAFE_APP} ${env.IMAGE_NAME}
+                    docker run -d -p 3000:3000 \
+                    --name ${env.SAFE_APP} \
+                    ${env.IMAGE_NAME}
                 """
             }
         }
@@ -150,7 +175,12 @@ EOF
     }
 
     post {
+        success {
+            echo "Deployment SUCCESS 🚀"
+        }
+
         failure {
+            echo "Deployment FAILED ❌"
             sh "docker logs ${env.SAFE_APP} || true"
         }
     }
