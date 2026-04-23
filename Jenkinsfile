@@ -15,28 +15,40 @@ pipeline {
 
     stages {
 
+        stage('Prepare') {
+            steps {
+                script {
+                    // ✅ sanitize app name (fix spaces + symbols)
+                    def cleanName = params.APP_NAME
+                        .toLowerCase()
+                        .replaceAll("[^a-z0-9-]", "-")
+
+                    env.APP_SAFE = cleanName
+
+                    echo "Sanitized App Name: ${env.APP_SAFE}"
+                }
+            }
+        }
+
         stage('Clone Repository') {
             steps {
                 script {
-                    sh "rm -rf /tmp/${params.APP_NAME}"
+                    sh "rm -rf /tmp/${env.APP_SAFE}"
 
-                    // AUTO FIX branch (main → master)
-                    def branchExists = sh(
-                        script: "git ls-remote --heads ${params.REPO_URL} ${params.BRANCH}",
-                        returnStatus: true
-                    )
+                    // ✅ auto detect default branch
+                    def branch = sh(
+                        script: "git ls-remote --symref ${params.REPO_URL} HEAD | grep -o 'refs/heads/.*' | sed 's#refs/heads/##'",
+                        returnStdout: true
+                    ).trim()
 
-                    def finalBranch = params.BRANCH
-
-                    if (branchExists != 0) {
-                        echo "Branch '${params.BRANCH}' not found → using master"
-                        finalBranch = "master"
+                    if (!branch) {
+                        branch = params.BRANCH
                     }
 
-                    echo "Using branch: ${finalBranch}"
+                    echo "Using branch: ${branch}"
 
                     sh """
-                        git clone --depth 1 -b ${finalBranch} ${params.REPO_URL} /tmp/${params.APP_NAME}
+                        git clone --depth 1 -b ${branch} ${params.REPO_URL} /tmp/${env.APP_SAFE}
                     """
                 }
             }
@@ -45,7 +57,7 @@ pipeline {
         stage('Detect Stack') {
             steps {
                 script {
-                    def path = "/tmp/${params.APP_NAME}"
+                    def path = "/tmp/${env.APP_SAFE}"
                     def stack = "unknown"
 
                     if (fileExists("${path}/package.json")) {
@@ -67,7 +79,7 @@ pipeline {
         stage('Build Dockerfile') {
             steps {
                 script {
-                    def path = "/tmp/${params.APP_NAME}"
+                    def path = "/tmp/${env.APP_SAFE}"
 
                     if (!fileExists("${path}/Dockerfile")) {
 
@@ -115,15 +127,12 @@ EOF
         stage('Build Image') {
             steps {
                 script {
-
-                    // ✅ FIX: define IMAGE_NAME HERE (not environment block)
-                    def IMAGE_NAME = "${DOCKERHUB_CREDS_USR}/${params.APP_NAME}:${params.DEPLOYMENT_ID}"
-
-                    env.IMAGE_NAME = IMAGE_NAME
+                    def IMAGE = "${DOCKERHUB_CREDS_USR}/${env.APP_SAFE}:${params.DEPLOYMENT_ID}"
+                    env.IMAGE_NAME = IMAGE
 
                     sh """
-                        cd /tmp/${params.APP_NAME}
-                        docker build -t ${IMAGE_NAME} .
+                        cd /tmp/${env.APP_SAFE}
+                        docker build -t ${IMAGE} .
                     """
                 }
             }
@@ -149,24 +158,21 @@ EOF
                     if (params.DEPLOY_TARGET == "VM") {
 
                         sh """
-docker stop ${params.APP_NAME} || true
-docker rm ${params.APP_NAME} || true
-
+docker rm -f ${env.APP_SAFE} || true
 docker pull ${env.IMAGE_NAME}
 
-docker run -d -p ${port}:3000 --name ${params.APP_NAME} ${env.IMAGE_NAME}
+docker run -d -p ${port}:3000 --name ${env.APP_SAFE} ${env.IMAGE_NAME}
                         """
+
+                        echo "App URL: http://YOUR_VM_IP:${port}"
 
                     } else {
 
                         sh """
 ssh -o StrictHostKeyChecking=no ubuntu@EC2_IP '
-docker stop ${params.APP_NAME} || true
-docker rm ${params.APP_NAME} || true
-
+docker rm -f ${env.APP_SAFE} || true
 docker pull ${env.IMAGE_NAME}
-
-docker run -d -p 80:3000 --name ${params.APP_NAME} ${env.IMAGE_NAME}
+docker run -d -p 80:3000 --name ${env.APP_SAFE} ${env.IMAGE_NAME}
 '
                         """
                     }
@@ -178,7 +184,7 @@ docker run -d -p 80:3000 --name ${params.APP_NAME} ${env.IMAGE_NAME}
             steps {
                 sh """
                     sleep 5
-                    docker ps | grep ${params.APP_NAME} || true
+                    docker ps | grep ${env.APP_SAFE} || true
                 """
             }
         }
@@ -188,9 +194,10 @@ docker run -d -p 80:3000 --name ${params.APP_NAME} ${env.IMAGE_NAME}
         success {
             echo "Deployment SUCCESS 🚀"
         }
+
         failure {
             echo "Deployment FAILED ❌"
-            sh "docker logs ${params.APP_NAME} || true"
+            sh "docker logs ${env.APP_SAFE} || true"
         }
     }
 }
