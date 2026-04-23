@@ -4,12 +4,16 @@ pipeline {
     parameters {
         string(name: 'REPO_URL', defaultValue: '', description: 'Git repository URL (required)')
         string(name: 'APP_NAME', defaultValue: 'myapp', description: 'App name (letters/numbers only)')
-        string(name: 'BRANCH', defaultValue: '', description: 'Optional branch')
+        string(name: 'BRANCH', defaultValue: '', description: 'Branch (optional)')
         string(name: 'DEPLOYMENT_ID', defaultValue: 'v1', description: 'Image tag/version')
     }
 
     environment {
         DOCKER_CREDS = credentials('dockerhub-cred')
+        SAFE_APP = "myapp"
+        BRANCH_NAME = "main"
+        IMAGE_NAME = ""
+        APP_PORT = ""
     }
 
     stages {
@@ -17,28 +21,21 @@ pipeline {
         stage('Validate Input') {
             steps {
                 script {
-
                     echo "RAW APP_NAME: ${params.APP_NAME}"
 
                     if (!params.REPO_URL?.trim()) {
-                        error "REPO_URL is required"
+                        error "❌ REPO_URL is required"
                     }
 
                     def rawApp = (params.APP_NAME ?: "myapp").toString().trim()
+                    def sanitized = rawApp.replaceAll(/[^a-zA-Z0-9]/, "").toLowerCase()
 
-                    // SAFE sanitization
-                    def safeApp = rawApp.replaceAll(/[^a-zA-Z0-9]/, "").toLowerCase()
-
-                    if (!safeApp?.trim()) {
-                        safeApp = "myapp"
+                    if (!sanitized?.trim()) {
+                        sanitized = "myapp"
                     }
 
-                    env.SAFE_APP = safeApp
-
-                    // ensure never null
-                    env.SAFE_APP = env.SAFE_APP ?: "myapp"
-
-                    echo "SAFE APP NAME: ${env.SAFE_APP}"
+                    env.SAFE_APP = sanitized
+                    echo "✔ SAFE APP NAME: ${env.SAFE_APP}"
                 }
             }
         }
@@ -46,32 +43,27 @@ pipeline {
         stage('Detect Branch') {
             steps {
                 script {
-
-                    def branchName = "main"
-
                     try {
                         if (params.BRANCH?.trim()) {
-                            branchName = params.BRANCH.trim()
+                            env.BRANCH_NAME = params.BRANCH.trim()
                         } else {
-                            def output = sh(
+                            def branches = sh(
                                 script: "git ls-remote --heads ${params.REPO_URL}",
                                 returnStdout: true
                             ).trim()
 
-                            def match = output.readLines().find { it.contains("refs/heads/") }
+                            def match = branches.readLines()
+                                .find { it.contains("refs/heads/") }
 
-                            if (match) {
-                                branchName = match.split("refs/heads/")[1]
-                            }
+                            env.BRANCH_NAME = match ?
+                                match.split("refs/heads/")[1] : "main"
                         }
                     } catch (e) {
                         echo "⚠ Branch detection failed → using main"
-                        branchName = "main"
+                        env.BRANCH_NAME = "main"
                     }
 
-                    env.BRANCH_NAME = branchName ?: "main"
-
-                    echo "Using branch: ${env.BRANCH_NAME}"
+                    echo "✔ Using branch: ${env.BRANCH_NAME}"
                 }
             }
         }
@@ -79,11 +71,9 @@ pipeline {
         stage('Clone Repo') {
             steps {
                 script {
-                    def dir = "/tmp/${env.SAFE_APP}"
-
                     sh """
-                        rm -rf ${dir}
-                        git clone --depth 1 -b ${env.BRANCH_NAME} ${params.REPO_URL} ${dir}
+                        rm -rf /tmp/${env.SAFE_APP}
+                        git clone --depth 1 -b ${env.BRANCH_NAME} ${params.REPO_URL} /tmp/${env.SAFE_APP}
                     """
                 }
             }
@@ -92,7 +82,6 @@ pipeline {
         stage('Detect Stack') {
             steps {
                 script {
-
                     def path = "/tmp/${env.SAFE_APP}"
 
                     if (fileExists("${path}/package.json")) {
@@ -103,7 +92,7 @@ pipeline {
                         env.STACK = "nodejs"
                     }
 
-                    echo "STACK: ${env.STACK}"
+                    echo "✔ STACK: ${env.STACK}"
                 }
             }
         }
@@ -111,14 +100,7 @@ pipeline {
         stage('Build Image') {
             steps {
                 script {
-
-                    def imageName = "${DOCKER_CREDS_USR}/${env.SAFE_APP}:${params.DEPLOYMENT_ID}"
-
-                    if (!imageName?.contains("/")) {
-                        error "Invalid image name generated"
-                    }
-
-                    env.IMAGE_NAME = imageName
+                    env.IMAGE_NAME = "${DOCKER_CREDS_USR}/${env.SAFE_APP}:${params.DEPLOYMENT_ID}"
 
                     sh """
                         cd /tmp/${env.SAFE_APP}
@@ -131,10 +113,10 @@ pipeline {
         stage('Push Image') {
             steps {
                 script {
-                    sh """
+                    sh '''
                         echo "$DOCKER_CREDS_PSW" | docker login -u "$DOCKER_CREDS_USR" --password-stdin
-                        docker push ${env.IMAGE_NAME}
-                    """
+                        docker push ${IMAGE_NAME}
+                    '''
                 }
             }
         }
@@ -142,24 +124,35 @@ pipeline {
         stage('Deploy') {
             steps {
                 script {
-
-                    def container = env.SAFE_APP
-
                     sh """
-                        docker stop ${container} || true
-                        docker rm ${container} || true
+                        docker stop ${env.SAFE_APP} || true
+                        docker rm ${env.SAFE_APP} || true
 
-                        docker run -d -p 3000:3000 \
-                        --name ${container} \
+                        PORT=\$(shuf -i 3000-3999 -n 1)
+
+                        docker run -d -p \$PORT:3000 \
+                        --name ${env.SAFE_APP} \
                         ${env.IMAGE_NAME}
+
+                        echo \$PORT > /tmp/${env.SAFE_APP}_port.txt
                     """
+
+                    env.APP_PORT = sh(
+                        script: "cat /tmp/${env.SAFE_APP}_port.txt",
+                        returnStdout: true
+                    ).trim()
                 }
             }
         }
 
         stage('Verify') {
             steps {
-                sh "docker ps | grep ${env.SAFE_APP} || true"
+                script {
+                    sh "docker ps | grep ${env.SAFE_APP} || true"
+
+                    echo "🌐 APP RUNNING AT:"
+                    echo "👉 http://192.168.122.127:${env.APP_PORT}"
+                }
             }
         }
     }
@@ -170,7 +163,7 @@ pipeline {
         }
 
         failure {
-            echo "❌ Deployment FAILED"
+            echo "❌ Deployment FAILED (check logs above)"
         }
     }
 }
