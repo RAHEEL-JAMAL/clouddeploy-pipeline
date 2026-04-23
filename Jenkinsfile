@@ -4,16 +4,13 @@ pipeline {
     parameters {
         string(name: 'REPO_URL', description: 'Git Repository URL')
         string(name: 'APP_NAME', description: 'Application Name')
-
-        // default is now empty → we auto-detect main/master
-        string(name: 'BRANCH', defaultValue: '', description: 'Git Branch (optional: auto main/master)')
-
+        string(name: 'BRANCH', defaultValue: 'main', description: 'Git Branch (auto fallback supported)')
         string(name: 'DEPLOYMENT_ID', description: 'Unique Deployment ID')
         choice(name: 'DEPLOY_TARGET', choices: ['VM', 'AWS'], description: 'Deployment Target')
     }
 
     environment {
-        DOCKERHUB_CREDS = credentials('dockerhub-cred')
+        IMAGE_NAME = ""
     }
 
     stages {
@@ -21,38 +18,23 @@ pipeline {
         stage('Clone Repository (Auto Branch Fix)') {
             steps {
                 script {
+                    def path = "/tmp/${params.APP_NAME}"
+                    sh "rm -rf ${path}"
 
-                    def repoDir = "/tmp/${params.APP_NAME}"
+                    // try main first, fallback to master automatically
+                    def branchToUse = params.BRANCH
 
-                    sh "rm -rf ${repoDir}"
+                    def cloneStatus = sh(script: """
+                        git ls-remote --heads ${params.REPO_URL} ${params.BRANCH} | wc -l
+                    """, returnStdout: true).trim()
 
-                    // 🔥 AUTO BRANCH LOGIC
-                    def branch = params.BRANCH
-
-                    if (branch == null || branch.trim() == "") {
-                        echo "No branch provided → trying main/master auto detection"
-
-                        sh """
-                            git ls-remote --heads ${params.REPO_URL} > /tmp/branches.txt
-                        """
-
-                        def branches = readFile('/tmp/branches.txt')
-
-                        if (branches.contains("refs/heads/main")) {
-                            branch = "main"
-                        } else if (branches.contains("refs/heads/master")) {
-                            branch = "master"
-                        } else {
-                            error "No main or master branch found in repo"
-                        }
-
-                        echo "Auto-selected branch: ${branch}"
+                    if (cloneStatus == "0") {
+                        echo "Branch ${params.BRANCH} not found, switching to master..."
+                        branchToUse = "master"
                     }
 
-                    env.SELECTED_BRANCH = branch
-
                     sh """
-                        git clone --depth 1 -b ${branch} ${params.REPO_URL} ${repoDir}
+                        git clone --depth 1 -b ${branchToUse} ${params.REPO_URL} ${path}
                     """
                 }
             }
@@ -61,7 +43,6 @@ pipeline {
         stage('Detect Stack') {
             steps {
                 script {
-
                     def path = "/tmp/${params.APP_NAME}"
                     def stack = "unknown"
 
@@ -84,7 +65,6 @@ pipeline {
         stage('Build Dockerfile (if needed)') {
             steps {
                 script {
-
                     def path = "/tmp/${params.APP_NAME}"
 
                     if (!fileExists("${path}/Dockerfile")) {
@@ -99,7 +79,7 @@ RUN npm install
 EXPOSE 3000
 CMD ["npm","start"]
 EOF
-"""
+                            """
                         }
 
                         else if (env.STACK == "python") {
@@ -111,7 +91,7 @@ COPY . .
 RUN pip install -r requirements.txt
 CMD ["python","app.py"]
 EOF
-"""
+                            """
                         }
 
                         else if (env.STACK == "java") {
@@ -122,12 +102,14 @@ WORKDIR /app
 COPY . .
 CMD ["java","-jar","app.jar"]
 EOF
-"""
+                            """
                         }
 
                         else {
                             error "Unsupported project type"
                         }
+                    } else {
+                        echo "Using existing Dockerfile"
                     }
                 }
             }
@@ -136,8 +118,7 @@ EOF
         stage('Build Image') {
             steps {
                 script {
-
-                    env.IMAGE_NAME = "${DOCKERHUB_CREDS_USR}/${params.APP_NAME}:${params.DEPLOYMENT_ID}"
+                    env.IMAGE_NAME = "${params.APP_NAME}-${params.DEPLOYMENT_ID}"
 
                     sh """
                         cd /tmp/${params.APP_NAME}
@@ -149,10 +130,13 @@ EOF
 
         stage('Push to DockerHub') {
             steps {
-                sh '''
-                    echo "$DOCKERHUB_CREDS_PSW" | docker login -u "$DOCKERHUB_CREDS_USR" --password-stdin
-                    docker push $IMAGE_NAME
-                '''
+                withCredentials([usernamePassword(credentialsId: 'dockerhub-cred', usernameVariable: 'USER', passwordVariable: 'PASS')]) {
+                    sh """
+                        echo $PASS | docker login -u $USER --password-stdin
+                        docker tag ${env.IMAGE_NAME} $USER/${params.APP_NAME}:${params.DEPLOYMENT_ID}
+                        docker push $USER/${params.APP_NAME}:${params.DEPLOYMENT_ID}
+                    """
+                }
             }
         }
 
@@ -160,25 +144,28 @@ EOF
             steps {
                 script {
 
+                    def port = "3000"
+                    def image = "${params.APP_NAME}:${params.DEPLOYMENT_ID}"
+
                     if (params.DEPLOY_TARGET == "VM") {
 
-                        sh '''
-docker stop $APP_NAME || true
-docker rm $APP_NAME || true
+                        sh """
+docker stop ${params.APP_NAME} || true
+docker rm ${params.APP_NAME} || true
 
-docker run -d -p 3000:3000 --name $APP_NAME $IMAGE_NAME
-'''
+docker run -d -p ${port}:3000 --name ${params.APP_NAME} ${image}
+                        """
+
                     } else {
 
-                        sh '''
-ssh -o StrictHostKeyChecking=no ubuntu@EC2_IP "
-docker stop $APP_NAME || true
-docker rm $APP_NAME || true
+                        sh """
+ssh -o StrictHostKeyChecking=no ubuntu@EC2_IP '
+docker stop ${params.APP_NAME} || true
+docker rm ${params.APP_NAME} || true
 
-docker pull $IMAGE_NAME
-docker run -d -p 80:3000 --name $APP_NAME $IMAGE_NAME
-"
-'''
+docker run -d -p 80:3000 --name ${params.APP_NAME} ${image}
+'
+                        """
                     }
                 }
             }
@@ -186,9 +173,10 @@ docker run -d -p 80:3000 --name $APP_NAME $IMAGE_NAME
 
         stage('Verify') {
             steps {
-                sh '''
-                    docker ps | grep $APP_NAME || true
-                '''
+                sh """
+                    sleep 5
+                    docker ps | grep ${params.APP_NAME} || true
+                """
             }
         }
     }
