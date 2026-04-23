@@ -19,8 +19,8 @@ pipeline {
         stage('Clone Repository') {
             steps {
                 sh """
-                    rm -rf /tmp/${APP_NAME}
-                    git clone --depth 1 -b ${BRANCH} ${REPO_URL} /tmp/${APP_NAME}
+                    rm -rf /tmp/${params.APP_NAME}
+                    git clone --depth 1 -b ${params.BRANCH} ${params.REPO_URL} /tmp/${params.APP_NAME}
                 """
             }
         }
@@ -29,7 +29,7 @@ pipeline {
             steps {
                 script {
 
-                    def path = "/tmp/${APP_NAME}"
+                    def path = "/tmp/${params.APP_NAME}"
                     def stack = "unknown"
 
                     if (fileExists("${path}/package.json")) {
@@ -58,7 +58,7 @@ pipeline {
             steps {
                 script {
 
-                    def path = "/tmp/${APP_NAME}"
+                    def path = "/tmp/${params.APP_NAME}"
 
                     if (!fileExists("${path}/Dockerfile")) {
 
@@ -112,11 +112,12 @@ EOF
         stage('Build Image') {
             steps {
                 script {
-                    env.IMAGE_NAME = "${DOCKERHUB_USERNAME}/${APP_NAME}:${DEPLOYMENT_ID}"
+
+                    env.IMAGE_NAME = "${env.DOCKERHUB_USERNAME}/${params.APP_NAME}:${params.DEPLOYMENT_ID}"
 
                     sh """
-                        cd /tmp/${APP_NAME}
-                        docker build -t ${IMAGE_NAME} .
+                        cd /tmp/${params.APP_NAME}
+                        docker build -t ${env.IMAGE_NAME} .
                     """
                 }
             }
@@ -125,8 +126,8 @@ EOF
         stage('Push to DockerHub') {
             steps {
                 sh """
-                    echo $DOCKERHUB_PASSWORD | docker login -u $DOCKERHUB_USERNAME --password-stdin
-                    docker push ${IMAGE_NAME}
+                    echo ${DOCKERHUB_PASSWORD} | docker login -u ${DOCKERHUB_USERNAME} --password-stdin
+                    docker push ${env.IMAGE_NAME}
                 """
             }
         }
@@ -140,24 +141,24 @@ EOF
                     if (params.DEPLOY_TARGET == "VM") {
 
                         sh """
-docker stop ${APP_NAME} || true
-docker rm ${APP_NAME} || true
+docker stop ${params.APP_NAME} || true
+docker rm ${params.APP_NAME} || true
 
-docker pull ${IMAGE_NAME}
+docker pull ${env.IMAGE_NAME}
 
-docker run -d -p ${port}:3000 --name ${APP_NAME} ${IMAGE_NAME}
+docker run -d -p ${port}:3000 --name ${params.APP_NAME} ${env.IMAGE_NAME}
                         """
 
                     } else {
 
                         sh """
 ssh -o StrictHostKeyChecking=no ubuntu@EC2_IP '
-docker stop ${APP_NAME} || true
-docker rm ${APP_NAME} || true
+docker stop ${params.APP_NAME} || true
+docker rm ${params.APP_NAME} || true
 
-docker pull ${IMAGE_NAME}
+docker pull ${env.IMAGE_NAME}
 
-docker run -d -p 80:3000 --name ${APP_NAME} ${IMAGE_NAME}
+docker run -d -p 80:3000 --name ${params.APP_NAME} ${env.IMAGE_NAME}
 '
                         """
                     }
@@ -169,7 +170,7 @@ docker run -d -p 80:3000 --name ${APP_NAME} ${IMAGE_NAME}
             steps {
                 sh """
                     sleep 5
-                    docker ps | grep ${APP_NAME} || true
+                    docker ps | grep ${params.APP_NAME} || true
                 """
             }
         }
@@ -182,7 +183,10 @@ docker run -d -p 80:3000 --name ${APP_NAME} ${IMAGE_NAME}
 
         failure {
             echo "Deployment FAILED ❌"
-            sh "docker logs ${APP_NAME} || true"
+
+            script {
+                sh "docker logs ${params.APP_NAME} || true"
+            }
         }
     }
 }
