@@ -4,9 +4,9 @@ pipeline {
     parameters {
         string(name: 'REPO_URL', description: 'Git Repository URL')
         string(name: 'APP_NAME', description: 'Application Name')
-        string(name: 'BRANCH', defaultValue: 'main', description: 'Git Branch (auto fallback supported)')
-        string(name: 'DEPLOYMENT_ID', description: 'Unique Deployment ID')
-        choice(name: 'DEPLOY_TARGET', choices: ['VM', 'AWS'], description: 'Deployment Target')
+        string(name: 'BRANCH', defaultValue: 'main', description: 'Preferred Branch')
+        string(name: 'DEPLOYMENT_ID', description: 'Deployment ID')
+        choice(name: 'DEPLOY_TARGET', choices: ['VM', 'AWS'], description: 'Deploy Target')
     }
 
     environment {
@@ -15,24 +15,28 @@ pipeline {
 
     stages {
 
-        stage('Clone Repository (Auto Branch Fix)') {
+        stage('Clone Repository (FIXED)') {
             steps {
                 script {
                     def path = "/tmp/${params.APP_NAME}"
                     sh "rm -rf ${path}"
 
-                    // try main first, fallback to master automatically
                     def branchToUse = params.BRANCH
 
-                    def cloneStatus = sh(script: """
-                        git ls-remote --heads ${params.REPO_URL} ${params.BRANCH} | wc -l
-                    """, returnStdout: true).trim()
+                    // ✅ check if branch exists
+                    def exists = sh(
+                        script: "git ls-remote --heads ${params.REPO_URL} ${params.BRANCH}",
+                        returnStatus: true
+                    )
 
-                    if (cloneStatus == "0") {
-                        echo "Branch ${params.BRANCH} not found, switching to master..."
+                    if (exists != 0) {
+                        echo "Branch '${params.BRANCH}' not found → switching to 'master'"
                         branchToUse = "master"
                     }
 
+                    echo "Using branch: ${branchToUse}"
+
+                    // ✅ correct clone
                     sh """
                         git clone --depth 1 -b ${branchToUse} ${params.REPO_URL} ${path}
                     """
@@ -79,10 +83,8 @@ RUN npm install
 EXPOSE 3000
 CMD ["npm","start"]
 EOF
-                            """
-                        }
-
-                        else if (env.STACK == "python") {
+"""
+                        } else if (env.STACK == "python") {
                             sh """
 cat > ${path}/Dockerfile <<EOF
 FROM python:3.10-alpine
@@ -91,10 +93,8 @@ COPY . .
 RUN pip install -r requirements.txt
 CMD ["python","app.py"]
 EOF
-                            """
-                        }
-
-                        else if (env.STACK == "java") {
+"""
+                        } else if (env.STACK == "java") {
                             sh """
 cat > ${path}/Dockerfile <<EOF
 FROM openjdk:17
@@ -102,12 +102,11 @@ WORKDIR /app
 COPY . .
 CMD ["java","-jar","app.jar"]
 EOF
-                            """
-                        }
-
-                        else {
+"""
+                        } else {
                             error "Unsupported project type"
                         }
+
                     } else {
                         echo "Using existing Dockerfile"
                     }
@@ -118,7 +117,7 @@ EOF
         stage('Build Image') {
             steps {
                 script {
-                    env.IMAGE_NAME = "${params.APP_NAME}-${params.DEPLOYMENT_ID}"
+                    env.IMAGE_NAME = "${params.APP_NAME}:${params.DEPLOYMENT_ID}"
 
                     sh """
                         cd /tmp/${params.APP_NAME}
@@ -143,9 +142,7 @@ EOF
         stage('Deploy') {
             steps {
                 script {
-
                     def port = "3000"
-                    def image = "${params.APP_NAME}:${params.DEPLOYMENT_ID}"
 
                     if (params.DEPLOY_TARGET == "VM") {
 
@@ -153,7 +150,7 @@ EOF
 docker stop ${params.APP_NAME} || true
 docker rm ${params.APP_NAME} || true
 
-docker run -d -p ${port}:3000 --name ${params.APP_NAME} ${image}
+docker run -d -p ${port}:3000 --name ${params.APP_NAME} ${params.APP_NAME}:${params.DEPLOYMENT_ID}
                         """
 
                     } else {
@@ -163,7 +160,7 @@ ssh -o StrictHostKeyChecking=no ubuntu@EC2_IP '
 docker stop ${params.APP_NAME} || true
 docker rm ${params.APP_NAME} || true
 
-docker run -d -p 80:3000 --name ${params.APP_NAME} ${image}
+docker run -d -p 80:3000 --name ${params.APP_NAME} ${params.APP_NAME}:${params.DEPLOYMENT_ID}
 '
                         """
                     }
