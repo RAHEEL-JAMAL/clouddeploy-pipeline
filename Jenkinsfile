@@ -1,14 +1,15 @@
-]pipeline {
+pipeline {
     agent any
 
     parameters {
-        string(name: 'REPO_URL', defaultValue: '', description: 'Git repo URL')
-        string(name: 'APP_NAME', defaultValue: 'myapp123', description: 'App name (letters/numbers only)')
-        string(name: 'BRANCH', defaultValue: '', description: 'Branch (optional)')
+        string(name: 'REPO_URL', defaultValue: '', description: 'Git Repo URL')
+        string(name: 'APP_NAME', defaultValue: 'myapp', description: 'App name (letters/numbers only)')
+        string(name: 'BRANCH', defaultValue: '', description: 'Optional branch')
         string(name: 'DEPLOYMENT_ID', defaultValue: 'v1', description: 'Version tag')
     }
 
     environment {
+        DOCKER_CREDS = credentials('dockerhub-cred')
         SAFE_APP = ""
         BRANCH_NAME = ""
         IMAGE_NAME = ""
@@ -19,22 +20,27 @@
         stage('Validate Input') {
             steps {
                 script {
+                    catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
 
-                    echo "RAW APP_NAME: ${params.APP_NAME}"
+                        def rawApp = (params.APP_NAME ?: "").trim()
+                        echo "RAW APP_NAME: ${rawApp}"
 
-                    // FIX 1: correct sanitization (IMPORTANT)
-                    def clean = params.APP_NAME?.toString().trim()
-                                    .replaceAll(/[^a-zA-Z0-9]/, "")
-                                    .toLowerCase()
+                        if (!params.REPO_URL?.trim()) {
+                            error "REPO_URL is required"
+                        }
 
-                    if (!clean || clean.length() == 0) {
-                        error "❌ APP_NAME invalid after sanitization (use only letters/numbers)"
+                        if (!rawApp) {
+                            error "APP_NAME is required"
+                        }
+
+                        env.SAFE_APP = rawApp.replaceAll(/[^a-zA-Z0-9]/, "").toLowerCase()
+
+                        if (!env.SAFE_APP?.trim()) {
+                            env.SAFE_APP = "app"   // SAFE FALLBACK (IMPORTANT FIX)
+                        }
+
+                        echo "SAFE APP: ${env.SAFE_APP}"
                     }
-
-                    env.SAFE_APP = clean
-                    env.DEPLOYMENT_ID = params.DEPLOYMENT_ID ?: "v1"
-
-                    echo "✔ SAFE APP: ${env.SAFE_APP}"
                 }
             }
         }
@@ -42,26 +48,23 @@
         stage('Detect Branch') {
             steps {
                 script {
+                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
 
-                    if (params.BRANCH?.trim()) {
-                        env.BRANCH_NAME = params.BRANCH.trim()
-                    } else {
+                        if (params.BRANCH?.trim()) {
+                            env.BRANCH_NAME = params.BRANCH
+                        } else {
+                            def out = sh(
+                                script: "git ls-remote --heads ${params.REPO_URL}",
+                                returnStdout: true
+                            ).trim()
 
-                        // FIX 2: proper default branch detection
-                        def branch = sh(
-                            script: """
-                                git ls-remote --heads ${params.REPO_URL} \
-                                | awk '{print \$2}' \
-                                | head -n 1 \
-                                | sed 's#refs/heads/##'
-                            """,
-                            returnStdout: true
-                        ).trim()
+                            def branch = out.readLines()[0]?.split("\t")[1]?.replace("refs/heads/", "")
 
-                        env.BRANCH_NAME = branch ?: "main"
+                            env.BRANCH_NAME = branch ?: "main"
+                        }
+
+                        echo "Branch: ${env.BRANCH_NAME}"
                     }
-
-                    echo "✔ Branch: ${env.BRANCH_NAME}"
                 }
             }
         }
@@ -69,10 +72,13 @@
         stage('Clone Repo') {
             steps {
                 script {
-                    sh """
-                        rm -rf /tmp/${env.SAFE_APP}
-                        git clone --depth 1 -b ${env.BRANCH_NAME} ${params.REPO_URL} /tmp/${env.SAFE_APP}
-                    """
+                    catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+
+                        sh """
+                            rm -rf /tmp/${env.SAFE_APP}
+                            git clone --depth 1 -b ${env.BRANCH_NAME} ${params.REPO_URL} /tmp/${env.SAFE_APP}
+                        """
+                    }
                 }
             }
         }
@@ -80,17 +86,20 @@
         stage('Detect Stack') {
             steps {
                 script {
-                    def path = "/tmp/${env.SAFE_APP}"
+                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
 
-                    if (fileExists("${path}/package.json")) {
-                        env.STACK = "nodejs"
-                    } else if (fileExists("${path}/requirements.txt")) {
-                        env.STACK = "python"
-                    } else {
-                        error "❌ Unsupported project type"
+                        def path = "/tmp/${env.SAFE_APP}"
+
+                        if (fileExists("${path}/package.json")) {
+                            env.STACK = "nodejs"
+                        } else if (fileExists("${path}/requirements.txt")) {
+                            env.STACK = "python"
+                        } else {
+                            env.STACK = "unknown"
+                        }
+
+                        echo "STACK: ${env.STACK}"
                     }
-
-                    echo "STACK: ${env.STACK}"
                 }
             }
         }
@@ -98,42 +107,58 @@
         stage('Build Image') {
             steps {
                 script {
+                    catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
 
-                    env.IMAGE_NAME = "raheeljamal/${env.SAFE_APP}:${env.DEPLOYMENT_ID}"
+                        env.IMAGE_NAME = "${DOCKER_CREDS_USR}/${env.SAFE_APP}:${env.DEPLOYMENT_ID}"
 
-                    sh """
-                        cd /tmp/${env.SAFE_APP}
-                        docker build -t ${env.IMAGE_NAME} .
-                    """
+                        sh """
+                            cd /tmp/${env.SAFE_APP}
+                            docker build -t ${env.IMAGE_NAME} .
+                        """
+                    }
                 }
             }
         }
 
         stage('Push Image') {
             steps {
-                sh """
-                    echo \$DOCKER_CREDS_PSW | docker login -u \$DOCKER_CREDS_USR --password-stdin
-                    docker push ${env.IMAGE_NAME}
-                """
+                script {
+                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+
+                        sh """
+                            echo "$DOCKER_CREDS_PSW" | docker login -u "$DOCKER_CREDS_USR" --password-stdin
+                            docker push ${env.IMAGE_NAME}
+                        """
+                    }
+                }
             }
         }
 
         stage('Deploy') {
             steps {
-                sh """
-                    docker rm -f ${env.SAFE_APP} || true
+                script {
+                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
 
-                    docker run -d \
-                        --name ${env.SAFE_APP} \
-                        -p 3000:3000 \
-                        ${env.IMAGE_NAME}
-                """
+                        sh """
+                            docker stop ${env.SAFE_APP} || true
+                            docker rm ${env.SAFE_APP} || true
+
+                            docker run -d -p 3000:3000 \
+                            --name ${env.SAFE_APP} \
+                            ${env.IMAGE_NAME}
+                        """
+                    }
+                }
             }
         }
 
         stage('Verify') {
             steps {
-                sh "docker ps | grep ${env.SAFE_APP} || true"
+                script {
+                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                        sh "docker ps | grep ${env.SAFE_APP} || true"
+                    }
+                }
             }
         }
     }
@@ -144,7 +169,7 @@
         }
 
         failure {
-            echo "❌ Deployment FAILED (check logs above)"
+            echo "❌ Pipeline failed (but partial stages may have run)"
         }
     }
 }
