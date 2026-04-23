@@ -40,33 +40,38 @@ pipeline {
             }
         }
 
-        stage('Detect Branch') {
-            steps {
-                script {
-                    try {
-                        if (params.BRANCH?.trim()) {
-                            env.BRANCH_NAME = params.BRANCH.trim()
-                        } else {
-                            def branches = sh(
-                                script: "git ls-remote --heads ${params.REPO_URL}",
-                                returnStdout: true
-                            ).trim()
+       
+       
+stage('Detect Branch') {
+    steps {
+        script {
 
-                            def match = branches.readLines()
-                                .find { it.contains("refs/heads/") }
+            def branches = sh(
+                script: "git ls-remote --heads ${params.REPO_URL}",
+                returnStdout: true
+            ).trim()
 
-                            env.BRANCH_NAME = match ?
-                                match.split("refs/heads/")[1] : "main"
-                        }
-                    } catch (e) {
-                        echo "⚠ Branch detection failed → using main"
-                        env.BRANCH_NAME = "main"
-                    }
-
-                    echo "✔ Using branch: ${env.BRANCH_NAME}"
-                }
+            def branchList = branches.readLines().collect {
+                it.split("refs/heads/")[1]
             }
+
+            echo "Available branches: ${branchList}"
+
+            // PRIORITY ORDER
+            if (branchList.contains("main")) {
+                env.BRANCH_NAME = "main"
+            } 
+            else if (branchList.contains("master")) {
+                env.BRANCH_NAME = "master"
+            } 
+            else {
+                env.BRANCH_NAME = branchList[0]
+            }
+
+            echo "✔ Auto Selected Branch: ${env.BRANCH_NAME}"
         }
+    }
+}
 
         stage('Clone Repo') {
             steps {
