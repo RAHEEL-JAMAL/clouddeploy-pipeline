@@ -10,8 +10,8 @@ pipeline {
 
     environment {
         DOCKER_CREDS = credentials('dockerhub-cred')
-        SAFE_APP = ""
-        BRANCH_NAME = ""
+        SAFE_APP = "myapp"
+        BRANCH_NAME = "main"
         IMAGE_NAME = ""
     }
 
@@ -20,22 +20,25 @@ pipeline {
         stage('Validate Input') {
             steps {
                 script {
+
                     echo "RAW APP_NAME: ${params.APP_NAME}"
 
                     if (!params.REPO_URL?.trim()) {
-                        error "REPO_URL is required"
+                        error "❌ REPO_URL is required"
                     }
 
-                    def rawApp = (params.APP_NAME ?: "myapp").trim()
+                    def rawApp = (params.APP_NAME ?: "myapp").toString().trim()
 
-                    // SAFE sanitization (prevents null)
-                    env.SAFE_APP = rawApp.replaceAll(/[^a-zA-Z0-9]/, "").toLowerCase()
+                    // FIX: never allow null
+                    def sanitized = rawApp.replaceAll(/[^a-zA-Z0-9]/, "").toLowerCase()
 
-                    if (!env.SAFE_APP?.trim()) {
-                        env.SAFE_APP = "myapp"
+                    if (!sanitized?.trim()) {
+                        sanitized = "myapp"
                     }
 
-                    echo "SAFE APP NAME: ${env.SAFE_APP}"
+                    env.SAFE_APP = sanitized
+
+                    echo "✔ SAFE APP NAME: ${env.SAFE_APP}"
                 }
             }
         }
@@ -43,22 +46,29 @@ pipeline {
         stage('Detect Branch') {
             steps {
                 script {
-                    if (params.BRANCH?.trim()) {
-                        env.BRANCH_NAME = params.BRANCH
-                    } else {
-                        def result = sh(
-                            script: "git ls-remote --heads ${params.REPO_URL}",
-                            returnStdout: true
-                        ).trim()
 
-                        def branch = result.readLines()
-                            .find { it.contains("refs/heads/") }
-                            ?.split("refs/heads/")[1]
+                    try {
+                        if (params.BRANCH?.trim()) {
+                            env.BRANCH_NAME = params.BRANCH.trim()
+                        } else {
+                            def branches = sh(
+                                script: "git ls-remote --heads ${params.REPO_URL}",
+                                returnStdout: true
+                            ).trim()
 
-                        env.BRANCH_NAME = branch ?: "main"
+                            def match = branches.readLines()
+                                .find { it.contains("refs/heads/") }
+
+                            env.BRANCH_NAME = match ?
+                                match.split("refs/heads/")[1] : "main"
+                        }
+
+                    } catch (e) {
+                        echo "⚠ Branch detection failed → using main"
+                        env.BRANCH_NAME = "main"
                     }
 
-                    echo "Using branch: ${env.BRANCH_NAME}"
+                    echo "✔ Using branch: ${env.BRANCH_NAME}"
                 }
             }
         }
@@ -66,10 +76,14 @@ pipeline {
         stage('Clone Repo') {
             steps {
                 script {
-                    sh """
-                        rm -rf /tmp/${env.SAFE_APP}
-                        git clone --depth 1 -b ${env.BRANCH_NAME} ${params.REPO_URL} /tmp/${env.SAFE_APP}
-                    """
+                    try {
+                        sh """
+                            rm -rf /tmp/${env.SAFE_APP}
+                            git clone --depth 1 -b ${env.BRANCH_NAME} ${params.REPO_URL} /tmp/${env.SAFE_APP}
+                        """
+                    } catch (e) {
+                        error "❌ Clone failed"
+                    }
                 }
             }
         }
@@ -84,10 +98,10 @@ pipeline {
                     } else if (fileExists("${path}/requirements.txt")) {
                         env.STACK = "python"
                     } else {
-                        env.STACK = "unknown"
+                        env.STACK = "nodejs"   // safe default
                     }
 
-                    echo "STACK: ${env.STACK}"
+                    echo "✔ STACK: ${env.STACK}"
                 }
             }
         }
@@ -95,7 +109,7 @@ pipeline {
         stage('Build Image') {
             steps {
                 script {
-                    env.IMAGE_NAME = "${DOCKER_CREDS_USR}/${env.SAFE_APP}:${env.DEPLOYMENT_ID}"
+                    env.IMAGE_NAME = "${DOCKER_CREDS_USR}/${env.SAFE_APP}:${params.DEPLOYMENT_ID}"
 
                     sh """
                         cd /tmp/${env.SAFE_APP}
@@ -144,7 +158,7 @@ pipeline {
         }
 
         failure {
-            echo "❌ Deployment FAILED"
+            echo "❌ Deployment FAILED (check logs above)"
         }
     }
 }
