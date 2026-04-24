@@ -2,7 +2,7 @@ pipeline {
     agent any
 
     parameters {
-        string(name: 'REPO_URL', defaultValue: '', description: 'Git repo URL')
+        string(name: 'REPO_URL', defaultValue: '', description: 'Git repository URL')
         string(name: 'APP_NAME', defaultValue: 'myapp', description: 'App name')
         string(name: 'BRANCH', defaultValue: '', description: 'Optional branch')
         string(name: 'DEPLOYMENT_ID', defaultValue: 'v1', description: 'Image tag')
@@ -33,6 +33,7 @@ pipeline {
 
                     if (params.BRANCH?.trim()) {
                         env.BRANCH_NAME = params.BRANCH.trim()
+                        echo "✔ Using user branch: ${env.BRANCH_NAME}"
                     } else {
 
                         def raw = sh(
@@ -40,18 +41,25 @@ pipeline {
                             returnStdout: true
                         ).trim()
 
-                        def branches = raw.split("\n").collect {
-                            it.split("refs/heads/")[1].trim()
+                        def branches = []
+                        raw.split("\n").each { line ->
+                            if (line.contains("refs/heads/")) {
+                                branches.add(line.split("refs/heads/")[1].trim())
+                            }
                         }
 
                         echo "Branches: ${branches}"
 
-                        env.BRANCH_NAME = branches.contains("main") ? "main" :
-                                           branches.contains("master") ? "master" :
-                                           branches[0]
-                    }
+                        if (branches.contains("main")) {
+                            env.BRANCH_NAME = "main"
+                        } else if (branches.contains("master")) {
+                            env.BRANCH_NAME = "master"
+                        } else {
+                            env.BRANCH_NAME = branches[0]
+                        }
 
-                    echo "✔ Branch: ${env.BRANCH_NAME}"
+                        echo "✔ Selected branch: ${env.BRANCH_NAME}"
+                    }
                 }
             }
         }
@@ -83,24 +91,65 @@ pipeline {
             }
         }
 
-        stage('Build Image (Optimized)') {
+        stage('Ensure Dockerfile') {
             steps {
                 script {
-                    env.IMAGE_NAME = "${DOCKER_CREDS_USR}/${env.SAFE_APP}:${params.DEPLOYMENT_ID}"
 
-                    sh """
-                        cd /tmp/${env.SAFE_APP}
-                        
-                        echo "🐳 Building optimized image..."
-                        docker build --no-cache=false -t ${env.IMAGE_NAME} .
-                    """
+                    def path = "/tmp/${env.SAFE_APP}"
 
-                    echo "✔ Built: ${env.IMAGE_NAME}"
+                    if (!fileExists("${path}/Dockerfile")) {
+
+                        echo "⚠ No Dockerfile found → generating..."
+
+                        if (env.STACK == "node") {
+
+                            writeFile file: "${path}/Dockerfile", text: '''
+FROM node:18
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+COPY . .
+EXPOSE 3000
+CMD ["npm","start"]
+'''
+
+                        } else {
+
+                            writeFile file: "${path}/Dockerfile", text: '''
+FROM python:3.10
+WORKDIR /app
+COPY . .
+RUN pip install -r requirements.txt
+EXPOSE 5000
+CMD ["python","app.py"]
+'''
+                        }
+
+                        echo "✔ Dockerfile created"
+                    } else {
+                        echo "✔ Dockerfile already exists"
+                    }
                 }
             }
         }
 
-        stage('Push Image (Fast & Safe)') {
+        stage('Build Image') {
+            steps {
+                script {
+
+                    env.IMAGE_NAME = "${DOCKER_CREDS_USR}/${env.SAFE_APP}:${params.DEPLOYMENT_ID}"
+
+                    sh """
+                        cd /tmp/${env.SAFE_APP}
+                        docker build -t ${env.IMAGE_NAME} .
+                    """
+
+                    echo "🐳 Built: ${env.IMAGE_NAME}"
+                }
+            }
+        }
+
+        stage('Push Image') {
             steps {
                 sh """
                     echo "$DOCKER_CREDS_PSW" | docker login -u "$DOCKER_CREDS_USR" --password-stdin
@@ -112,6 +161,7 @@ pipeline {
         stage('Deploy Container') {
             steps {
                 script {
+
                     sh """
                         docker stop ${env.SAFE_APP} || true
                         docker rm ${env.SAFE_APP} || true
