@@ -1,49 +1,98 @@
-stage('Detect Branch') {
-    steps {
-        script {
+pipeline {
+    agent any
 
-            // 1. If user provided branch → use it
-            if (params.BRANCH?.trim()) {
-                env.BRANCH_NAME = params.BRANCH.trim()
-                echo "✔ Using user-provided branch: ${env.BRANCH_NAME}"
-                return
-            }
+    parameters {
+        string(name: 'REPO_URL', defaultValue: '', description: 'Git repository URL')
+        string(name: 'APP_NAME', defaultValue: 'myapp', description: 'App name')
+        string(name: 'BRANCH', defaultValue: '', description: 'Branch (optional)')
+        string(name: 'DEPLOYMENT_ID', defaultValue: 'v1', description: 'Tag')
+    }
 
-            // 2. Get raw output
-            def raw = sh(
-                script: "git ls-remote --heads ${params.REPO_URL}",
-                returnStdout: true
-            ).trim()
+    environment {
+        DOCKER_CREDS = credentials('dockerhub-cred')
+    }
 
-            echo "RAW OUTPUT:"
-            echo raw
+    stages {
 
-            // 3. Extract branches SAFELY
-            def branchList = []
+        stage('Init') {
+            steps {
+                script {
+                    env.SAFE_APP = params.APP_NAME.replaceAll(/[^a-zA-Z0-9]/, "").toLowerCase()
+                    if (!env.SAFE_APP) {
+                        env.SAFE_APP = "myapp"
+                    }
 
-            raw.split("\n").each { line ->
-                if (line.contains("refs/heads/")) {
-                    def name = line.split("refs/heads/")[1].trim()
-                    branchList.add(name)
+                    echo "✔ APP: ${env.SAFE_APP}"
                 }
             }
+        }
 
-            echo "Parsed branches: ${branchList}"
+        stage('Detect Branch') {
+            steps {
+                script {
 
-            // 4. FORCE LOGIC (no ambiguity)
-            if (branchList.size() == 0) {
-                error "❌ No branches found!"
+                    def raw = sh(
+                        script: "git ls-remote --heads ${params.REPO_URL}",
+                        returnStdout: true
+                    ).trim()
+
+                    def branches = []
+
+                    raw.split("\n").each { line ->
+                        if (line.contains("refs/heads/")) {
+                            branches.add(line.split("refs/heads/")[1].trim())
+                        }
+                    }
+
+                    echo "Branches: ${branches}"
+
+                    if (params.BRANCH?.trim()) {
+                        env.BRANCH_NAME = params.BRANCH
+                    } else if (branches.contains("main")) {
+                        env.BRANCH_NAME = "main"
+                    } else if (branches.contains("master")) {
+                        env.BRANCH_NAME = "master"
+                    } else {
+                        env.BRANCH_NAME = branches[0]
+                    }
+
+                    echo "✔ Branch selected: ${env.BRANCH_NAME}"
+                }
             }
+        }
 
-            if (branchList.contains("main")) {
-                env.BRANCH_NAME = "main"
-            } else if (branchList.contains("master")) {
-                env.BRANCH_NAME = "master"
-            } else {
-                env.BRANCH_NAME = branchList[0]
+        stage('Clone') {
+            steps {
+                sh """
+                    rm -rf /tmp/${env.SAFE_APP}
+                    git clone --depth 1 -b ${env.BRANCH_NAME} ${params.REPO_URL} /tmp/${env.SAFE_APP}
+                """
             }
+        }
 
-            echo "✅ FINAL SELECTED BRANCH: ${env.BRANCH_NAME}"
+        stage('Detect Stack') {
+            steps {
+                script {
+                    if (fileExists("/tmp/${env.SAFE_APP}/package.json")) {
+                        env.STACK = "node"
+                    } else if (fileExists("/tmp/${env.SAFE_APP}/requirements.txt")) {
+                        env.STACK = "python"
+                    } else {
+                        env.STACK = "node"
+                    }
+
+                    echo "✔ Stack: ${env.STACK}"
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "🚀 SUCCESS"
+        }
+        failure {
+            echo "❌ FAILED"
         }
     }
 }
