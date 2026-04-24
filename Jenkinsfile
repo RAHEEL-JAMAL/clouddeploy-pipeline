@@ -2,7 +2,7 @@ pipeline {
     agent any
 
     parameters {
-        string(name: 'REPO_URL', defaultValue: '', description: 'Git repository URL')
+        string(name: 'REPO_URL', defaultValue: '', description: 'Git repo URL')
         string(name: 'APP_NAME', defaultValue: 'myapp', description: 'App name')
         string(name: 'BRANCH', defaultValue: '', description: 'Optional branch')
         string(name: 'DEPLOYMENT_ID', defaultValue: 'v1', description: 'Image tag')
@@ -33,7 +33,6 @@ pipeline {
 
                     if (params.BRANCH?.trim()) {
                         env.BRANCH_NAME = params.BRANCH.trim()
-                        echo "✔ Using user branch: ${env.BRANCH_NAME}"
                     } else {
 
                         def raw = sh(
@@ -41,25 +40,18 @@ pipeline {
                             returnStdout: true
                         ).trim()
 
-                        def branches = []
-                        raw.split("\n").each { line ->
-                            if (line.contains("refs/heads/")) {
-                                branches.add(line.split("refs/heads/")[1].trim())
-                            }
+                        def branches = raw.split("\n").collect {
+                            it.split("refs/heads/")[1].trim()
                         }
 
-                        echo "Branches found: ${branches}"
+                        echo "Branches: ${branches}"
 
-                        if (branches.contains("main")) {
-                            env.BRANCH_NAME = "main"
-                        } else if (branches.contains("master")) {
-                            env.BRANCH_NAME = "master"
-                        } else {
-                            env.BRANCH_NAME = branches[0]
-                        }
-
-                        echo "✔ Selected branch: ${env.BRANCH_NAME}"
+                        env.BRANCH_NAME = branches.contains("main") ? "main" :
+                                           branches.contains("master") ? "master" :
+                                           branches[0]
                     }
+
+                    echo "✔ Branch: ${env.BRANCH_NAME}"
                 }
             }
         }
@@ -91,57 +83,24 @@ pipeline {
             }
         }
 
-        stage('Ensure Dockerfile') {
-            steps {
-                script {
-                    def path = "/tmp/${env.SAFE_APP}"
-
-                    if (!fileExists("${path}/Dockerfile")) {
-
-                        echo "⚠ No Dockerfile found → generating..."
-
-                        if (env.STACK == "node") {
-                            writeFile file: "${path}/Dockerfile", text: '''
-FROM node:18
-WORKDIR /app
-COPY . .
-RUN npm install
-EXPOSE 3000
-CMD ["npm","start"]
-'''
-                        } else {
-                            writeFile file: "${path}/Dockerfile", text: '''
-FROM python:3.10
-WORKDIR /app
-COPY . .
-RUN pip install -r requirements.txt
-EXPOSE 5000
-CMD ["python","app.py"]
-'''
-                        }
-                    } else {
-                        echo "✔ Dockerfile exists"
-                    }
-                }
-            }
-        }
-
-        stage('Build Image') {
+        stage('Build Image (Optimized)') {
             steps {
                 script {
                     env.IMAGE_NAME = "${DOCKER_CREDS_USR}/${env.SAFE_APP}:${params.DEPLOYMENT_ID}"
 
                     sh """
                         cd /tmp/${env.SAFE_APP}
-                        docker build -t ${env.IMAGE_NAME} .
+                        
+                        echo "🐳 Building optimized image..."
+                        docker build --no-cache=false -t ${env.IMAGE_NAME} .
                     """
 
-                    echo "🐳 Built: ${env.IMAGE_NAME}"
+                    echo "✔ Built: ${env.IMAGE_NAME}"
                 }
             }
         }
 
-        stage('Push Image') {
+        stage('Push Image (Fast & Safe)') {
             steps {
                 sh """
                     echo "$DOCKER_CREDS_PSW" | docker login -u "$DOCKER_CREDS_USR" --password-stdin
@@ -179,7 +138,7 @@ CMD ["python","app.py"]
             steps {
                 sh "docker ps | grep ${env.SAFE_APP} || true"
 
-                echo "🌍 App running at:"
+                echo "🌍 LIVE URL:"
                 echo "👉 http://192.168.122.127:${env.APP_PORT}"
             }
         }
@@ -189,6 +148,7 @@ CMD ["python","app.py"]
         success {
             echo "🚀 DEPLOYMENT SUCCESS"
         }
+
         failure {
             echo "❌ DEPLOYMENT FAILED"
         }
