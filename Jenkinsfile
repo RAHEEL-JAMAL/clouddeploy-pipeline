@@ -14,6 +14,7 @@ pipeline {
         BRANCH_NAME = "main"
         IMAGE_NAME = ""
         APP_PORT = ""
+        STACK = ""
     }
 
     stages {
@@ -40,38 +41,42 @@ pipeline {
             }
         }
 
-       
-       
-stage('Detect Branch') {
-    steps {
-        script {
+        stage('Detect Branch') {
+            steps {
+                script {
 
-            def branches = sh(
-                script: "git ls-remote --heads ${params.REPO_URL}",
-                returnStdout: true
-            ).trim()
+                    // If user provided branch → use it
+                    if (params.BRANCH?.trim()) {
+                        env.BRANCH_NAME = params.BRANCH.trim()
+                        echo "✔ Using user-provided branch: ${env.BRANCH_NAME}"
+                        return
+                    }
 
-            def branchList = branches.readLines().collect {
-                it.split("refs/heads/")[1]
+                    def branchesRaw = sh(
+                        script: "git ls-remote --heads ${params.REPO_URL}",
+                        returnStdout: true
+                    ).trim()
+
+                    def branchList = branchesRaw.readLines().collect {
+                        it.split("refs/heads/")[1].trim()
+                    }
+
+                    echo "Available branches: ${branchList}"
+
+                    if (branchList.any { it == "main" }) {
+                        env.BRANCH_NAME = "main"
+                    } 
+                    else if (branchList.any { it == "master" }) {
+                        env.BRANCH_NAME = "master"
+                    } 
+                    else {
+                        env.BRANCH_NAME = branchList[0]
+                    }
+
+                    echo "✔ Auto Selected Branch: ${env.BRANCH_NAME}"
+                }
             }
-
-            echo "Available branches: ${branchList}"
-
-            // PRIORITY ORDER
-            if (branchList.contains("main")) {
-                env.BRANCH_NAME = "main"
-            } 
-            else if (branchList.contains("master")) {
-                env.BRANCH_NAME = "master"
-            } 
-            else {
-                env.BRANCH_NAME = branchList[0]
-            }
-
-            echo "✔ Auto Selected Branch: ${env.BRANCH_NAME}"
         }
-    }
-}
 
         stage('Clone Repo') {
             steps {
@@ -102,6 +107,40 @@ stage('Detect Branch') {
             }
         }
 
+        stage('Ensure Dockerfile') {
+            steps {
+                script {
+                    def path = "/tmp/${env.SAFE_APP}"
+
+                    if (!fileExists("${path}/Dockerfile")) {
+                        echo "⚠ No Dockerfile found → Generating one..."
+
+                        if (env.STACK == "nodejs") {
+                            writeFile file: "${path}/Dockerfile", text: '''
+FROM node:18
+WORKDIR /app
+COPY . .
+RUN npm install
+EXPOSE 3000
+CMD ["npm", "start"]
+'''
+                        } else if (env.STACK == "python") {
+                            writeFile file: "${path}/Dockerfile", text: '''
+FROM python:3.10
+WORKDIR /app
+COPY . .
+RUN pip install -r requirements.txt
+EXPOSE 5000
+CMD ["python", "app.py"]
+'''
+                        }
+                    } else {
+                        echo "✔ Dockerfile already exists"
+                    }
+                }
+            }
+        }
+
         stage('Build Image') {
             steps {
                 script {
@@ -118,10 +157,10 @@ stage('Detect Branch') {
         stage('Push Image') {
             steps {
                 script {
-                    sh '''
+                    sh """
                         echo "$DOCKER_CREDS_PSW" | docker login -u "$DOCKER_CREDS_USR" --password-stdin
-                        docker push ${IMAGE_NAME}
-                    '''
+                        docker push ${env.IMAGE_NAME}
+                    """
                 }
             }
         }
