@@ -12,7 +12,7 @@ pipeline {
             steps {
                 script {
                     env.APP_NAME = params.APP_NAME ?: "app-${env.BUILD_NUMBER}"
-                    env.REPO_URL = params.REPO_URL ?: "https://github.com/RAHEEL-JAMAL/dockerizing-reactjs-app.git"
+                    env.REPO_URL = params.REPO_URL
 
                     echo "🚀 App: ${env.APP_NAME}"
                     echo "📦 Repo: ${env.REPO_URL}"
@@ -28,8 +28,13 @@ pipeline {
                         returnStdout: true
                     ).trim()
 
-                    def selected = branches.contains("main") ? "main" : "master"
-                    env.BRANCH = selected
+                    def branchList = branches.readLines().collect {
+                        it.split()[1].replace("refs/heads/", "")
+                    }
+
+                    env.BRANCH = branchList.contains("main") ? "main" :
+                                 branchList.contains("master") ? "master" :
+                                 branchList[0]
 
                     echo "✔ Auto branch: ${env.BRANCH}"
                 }
@@ -39,12 +44,9 @@ pipeline {
         stage('Clone Repo') {
             steps {
                 script {
+                    sh "rm -rf /tmp/${env.APP_NAME}"
+                    sh "git clone --depth 1 -b ${env.BRANCH} ${env.REPO_URL} /tmp/${env.APP_NAME}"
                     env.APP_DIR = "/tmp/${env.APP_NAME}"
-
-                    sh """
-                        rm -rf ${env.APP_DIR}
-                        git clone --depth 1 -b ${env.BRANCH} ${env.REPO_URL} ${env.APP_DIR}
-                    """
                 }
             }
         }
@@ -52,12 +54,7 @@ pipeline {
         stage('Detect Stack') {
             steps {
                 script {
-                    if (fileExists("${env.APP_DIR}/package.json")) {
-                        env.STACK = "node"
-                    } else {
-                        env.STACK = "unknown"
-                    }
-
+                    env.STACK = fileExists("${env.APP_DIR}/package.json") ? "node" : "unknown"
                     echo "📦 Stack: ${env.STACK}"
                 }
             }
@@ -72,23 +69,17 @@ pipeline {
                         echo "⚠ No Dockerfile → creating"
 
                         writeFile file: dockerfile, text: """
-FROM node:20-alpine as build
+FROM node:20-alpine
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm install
+RUN npm ci --omit=dev || npm install --omit=dev
 
 COPY . .
-RUN npm run build
 
-FROM nginx:alpine
-COPY --from=build /app/dist /usr/share/nginx/html
-
-EXPOSE 80
-CMD ["nginx", "-g", "daemon off;"]
+EXPOSE 3000
+CMD ["npm","start"]
 """
-                    } else {
-                        echo "✔ Dockerfile exists"
                     }
                 }
             }
@@ -97,27 +88,34 @@ CMD ["nginx", "-g", "daemon off;"]
         stage('Build Image') {
             steps {
                 script {
+                    env.IMAGE_TAG = "v${env.BUILD_NUMBER}"
+
                     sh """
                         cd ${env.APP_DIR}
-                        docker build -t ${env.DOCKER_IMAGE}:v1 .
+                        DOCKER_BUILDKIT=1 docker build -t ${DOCKER_IMAGE}:${IMAGE_TAG} .
                     """
 
-                    echo "🐳 Built: ${env.DOCKER_IMAGE}:v1"
+                    echo "🐳 Built: ${DOCKER_IMAGE}:${IMAGE_TAG}"
                 }
             }
         }
 
-        stage('Push Image') {
+        stage('Push Image (FIXED SAFE LOGIN)') {
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: 'dockerhub-cred',
                     usernameVariable: 'DOCKER_USER',
                     passwordVariable: 'DOCKER_PASS'
                 )]) {
-                    sh """
-                        echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin
-                        docker push ${env.DOCKER_IMAGE}:v1
-                    """
+                    script {
+                        sh '''
+                            echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                        '''
+
+                        sh """
+                            docker push ${DOCKER_IMAGE}:${IMAGE_TAG}
+                        """
+                    }
                 }
             }
         }
@@ -125,19 +123,21 @@ CMD ["nginx", "-g", "daemon off;"]
         stage('Deploy Container') {
             steps {
                 script {
+
+                    sh """
+                        docker stop ${CONTAINER_NAME} || true
+                        docker rm ${CONTAINER_NAME} || true
+                    """
+
                     def port = sh(script: "shuf -i 3000-3999 -n 1", returnStdout: true).trim()
 
                     sh """
-                        docker stop ${env.CONTAINER_NAME} || true
-                        docker rm ${env.CONTAINER_NAME} || true
-
                         docker run -d \
-                        -p ${port}:80 \
-                        --name ${env.CONTAINER_NAME} \
-                        ${env.DOCKER_IMAGE}:v1
+                        -p ${port}:3000 \
+                        --name ${CONTAINER_NAME} \
+                        ${DOCKER_IMAGE}:${IMAGE_TAG}
                     """
 
-                    echo "🌐 Running on port: ${port}"
                     env.PORT = port
                 }
             }
@@ -145,10 +145,8 @@ CMD ["nginx", "-g", "daemon off;"]
 
         stage('Verify') {
             steps {
-                script {
-                    echo "🚀 LIVE URL:"
-                    echo "👉 http://192.168.122.127:${env.PORT}"
-                }
+                echo "🚀 LIVE URL:"
+                echo "👉 http://192.168.122.127:${env.PORT}"
             }
         }
     }
