@@ -97,20 +97,22 @@ CMD ["npm","start"]
             }
         }
 
-        stage('Push Image') {
-            steps {
-                withCredentials([usernamePassword(credentialsId: 'dockerhub-creds',
-                    usernameVariable: 'DOCKER_USER',
-                    passwordVariable: 'DOCKER_PASS')]) {
+      stage('Push Image') {
+    steps {
+        withCredentials([usernamePassword(
+            credentialsId: 'dockerhub-creds',
+            usernameVariable: 'DOCKER_USER',
+            passwordVariable: 'DOCKER_PASS'
+        )]) {
 
-                    sh """
-                        echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin
-                        docker push ${IMAGE_NAME}
-                    """
-                }
-            }
+            sh '''
+                set +x
+                echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                docker push raheeljamal/app-${BUILD_NUMBER}:v1
+            '''
         }
-
+    }
+}
         stage('Deploy Container') {
             steps {
                 script {
