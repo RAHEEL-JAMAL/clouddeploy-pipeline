@@ -1,15 +1,16 @@
 pipeline {
     agent any
 
+    environment {
+        DOCKERHUB_USER = "raheeljamal"
+        IMAGE_NAME     = "${DOCKERHUB_USER}/${APP_NAME}"
+        DOCKER_BUILDKIT = "1"
+    }
+
     parameters {
         string(name: 'APP_NAME', defaultValue: 'myapp', description: 'App name')
         string(name: 'REPO_URL', defaultValue: '', description: 'Git repo URL')
         string(name: 'BRANCH', defaultValue: 'auto', description: 'Branch auto/master/main')
-    }
-
-    environment {
-        DOCKERHUB_USER = "raheeljamal"
-        IMAGE_NAME     = "${DOCKERHUB_USER}/${params.APP_NAME}"
     }
 
     stages {
@@ -18,15 +19,6 @@ pipeline {
             steps {
                 echo "🚀 Deploying: ${params.APP_NAME}"
                 echo "📦 Repo: ${params.REPO_URL}"
-            }
-        }
-
-        stage('Safe Docker Check') {
-            steps {
-                sh '''
-                    echo "⚙️ Checking Docker connectivity..."
-                    docker info || true
-                '''
             }
         }
 
@@ -40,6 +32,8 @@ pipeline {
                             script: """git ls-remote --heads ${params.REPO_URL} | awk '{print \$2}' | sed 's#refs/heads/##'""",
                             returnStdout: true
                         ).trim()
+
+                        echo "🔍 Branches: ${branches}"
 
                         if (branches.contains("main")) {
                             branch = "main"
@@ -83,7 +77,7 @@ pipeline {
             }
         }
 
-        stage('Build Frontend') {
+        stage('Build App (if needed)') {
             steps {
                 script {
                     if (env.STACK == "node") {
@@ -105,7 +99,6 @@ pipeline {
         stage('Prepare Dockerfile') {
             steps {
                 script {
-
                     if (!fileExists("app/Dockerfile")) {
 
                         if (env.STACK == "django") {
@@ -128,7 +121,7 @@ CMD ["nginx", "-g", "daemon off;"]
 
                         echo "📝 Dockerfile created"
                     } else {
-                        echo "📝 Existing Dockerfile used"
+                        echo "📝 Using existing Dockerfile"
                     }
                 }
             }
@@ -143,7 +136,7 @@ CMD ["nginx", "-g", "daemon off;"]
             }
         }
 
-        stage('Push Image (SAFE RETRY)') {
+        stage('Push Image (RETRY FIXED)') {
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: 'dockerhub-cred',
@@ -152,38 +145,52 @@ CMD ["nginx", "-g", "daemon off;"]
                 )]) {
 
                     sh '''
-                        set +e
+                        set -e
 
-                        echo "$PASS" | docker login -u "$USER" --password-stdin
+                        echo "🔐 Logging into DockerHub..."
 
-                        echo "🚀 Pushing image (with retry)..."
-
-                        docker push ''' + IMAGE_NAME + ''':v1
-
-                        if [ $? -ne 0 ]; then
-                            echo "⚠️ First push failed, retrying..."
+                        for i in 1 2 3; do
+                            echo "$PASS" | docker login -u "$USER" --password-stdin && break
+                            echo "⚠️ Login failed retry $i"
                             sleep 5
-                            docker push ''' + IMAGE_NAME + ''':v1 || true
-                        fi
+                        done
+
+                        echo "🚀 Pushing image with retry..."
+
+                        for i in 1 2 3; do
+                            docker push ${IMAGE_NAME}:v1 && break
+                            echo "⚠️ Push failed retry $i"
+                            sleep 10
+                        done
                     '''
                 }
             }
         }
 
-        stage('Deploy (AUTO PORT SAFE)') {
+        stage('Deploy') {
             steps {
                 script {
 
                     def hostPort = sh(script: "shuf -i 3000-3999 -n 1", returnStdout: true).trim()
-                    def containerPort = (env.STACK == "django") ? "8000" : "80"
+
+                    def containerPort = "80"
+                    if (env.STACK == "django") {
+                        containerPort = "8000"
+                    }
+
+                    echo "🧠 Mapping: ${hostPort} -> ${containerPort}"
 
                     sh """
                         docker stop ${params.APP_NAME} || true
                         docker rm ${params.APP_NAME} || true
-                        docker run -d -p ${hostPort}:${containerPort} --name ${params.APP_NAME} ${IMAGE_NAME}:v1
+
+                        docker run -d \
+                        -p ${hostPort}:${containerPort} \
+                        --name ${params.APP_NAME} \
+                        ${IMAGE_NAME}:v1
                     """
 
-                    echo "🌐 LIVE URL: http://192.168.122.127:${hostPort}"
+                    echo "🌐 LIVE: http://192.168.122.127:${hostPort}"
                 }
             }
         }
@@ -200,7 +207,7 @@ CMD ["nginx", "-g", "daemon off;"]
             echo "🚀 SUCCESS"
         }
         failure {
-            echo "❌ FAILED (check Docker network or internet)"
+            echo "❌ FAILED"
         }
     }
 }
