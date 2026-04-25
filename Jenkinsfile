@@ -2,9 +2,10 @@ pipeline {
     agent any
 
     environment {
-        IMAGE_NAME = "raheeljamal/${JOB_NAME}"
-        DOCKER_CREDS = "dockerhub-cred"
+        IMAGE_NAME = "raheeljamal/fyp-pipeline"
+        CONTAINER_NAME = "fyp-app"
         PORT = "80"
+        DOCKER_CREDS = "dockerhub-cred"
     }
 
     stages {
@@ -26,45 +27,56 @@ pipeline {
             }
         }
 
-        stage("Build Docker Image") {
+        stage("Build Image (FIXED - NO BUILDKIT)") {
             steps {
                 sh '''
                     cd app
 
                     cat > Dockerfile << 'EOF'
-FROM node:20-alpine as build
+# ---------- BUILD ----------
+FROM node:20-alpine AS build
 WORKDIR /app
+
 COPY . .
 RUN npm install && npm run build
 
+# ---------- RUN ----------
 FROM nginx:alpine
 
-# FIX: SPA routing + MIME issues
+# Clean default nginx files
 RUN rm -rf /usr/share/nginx/html/*
+
+# Copy build output
 COPY --from=build /app/dist /usr/share/nginx/html
 
-# FIX: proper SPA routing (prevents 404 refresh error)
+# FIX SPA ROUTING + FIX 404 + FIX MIME ISSUES
 RUN printf 'server {\n\
-  listen 80;\n\
-  server_name localhost;\n\
-  root /usr/share/nginx/html;\n\
-  index index.html;\n\
+    listen 80;\n\
+    server_name localhost;\n\
+    root /usr/share/nginx/html;\n\
+    index index.html;\n\
 \n\
-  location / {\n\
-    try_files $uri /index.html;\n\
-  }\n\
+    location / {\n\
+        try_files $uri $uri/ /index.html;\n\
+    }\n\
+\n\
+    location ~* \\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2)$ {\n\
+        expires 1y;\n\
+        add_header Cache-Control "public, immutable";\n\
+    }\n\
 }\n' > /etc/nginx/conf.d/default.conf
 
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
 EOF
 
-                    DOCKER_BUILDKIT=1 docker build -t $IMAGE_NAME:v1 .
+                    # IMPORTANT FIX: NO BUILDKIT (avoids your crash)
+                    docker build --no-cache -t $IMAGE_NAME:v1 .
                 '''
             }
         }
 
-        stage("Push Image") {
+        stage("Push Image (SAFE)") {
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: "${DOCKER_CREDS}",
@@ -79,15 +91,16 @@ EOF
             }
         }
 
-        stage("Deploy Container") {
+        stage("Deploy Container (FIXED PORT + CLEAN)") {
             steps {
                 sh '''
-                    docker stop app || true
-                    docker rm app || true
+                    docker stop $CONTAINER_NAME || true
+                    docker rm $CONTAINER_NAME || true
 
                     docker run -d \
-                        --name app \
+                        --name $CONTAINER_NAME \
                         -p 80:80 \
+                        --restart unless-stopped \
                         $IMAGE_NAME:v1
                 '''
             }
@@ -95,8 +108,10 @@ EOF
 
         stage("Verify") {
             steps {
-                echo "🚀 App deployed successfully"
-                echo "👉 http://<your-vm-ip>"
+                script {
+                    echo "🚀 APP RUNNING"
+                    echo "👉 http://192.168.122.127"
+                }
             }
         }
     }
