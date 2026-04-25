@@ -31,7 +31,6 @@ pipeline {
             steps {
                 script {
 
-                    // get all used ports
                     def usedPorts = sh(
                         script: "docker ps --format '{{.Ports}}' | grep -o '[0-9]\\+->' | cut -d'>' -f1 || true",
                         returnStdout: true
@@ -71,17 +70,60 @@ pipeline {
                         env.STACK = "node"
                         env.INTERNAL_PORT = "80"
 
-                    } else if (fileExists('app/index.php')) {
-                        env.STACK = "php"
-                        env.INTERNAL_PORT = "80"
-
                     } else {
-                        env.STACK = "unknown"
+                        env.STACK = "static"
                         env.INTERNAL_PORT = "80"
                     }
 
                     echo "📦 Stack: ${STACK}"
-                    echo "🔌 Internal Port: ${INTERNAL_PORT}"
+                }
+            }
+        }
+
+        stage('Auto Create Dockerfile (IMPORTANT FIX)') {
+            steps {
+                script {
+
+                    if (!fileExists('app/Dockerfile')) {
+
+                        echo "🛠 No Dockerfile found → generating one"
+
+                        if (env.STACK == "django") {
+                            writeFile file: 'app/Dockerfile', text: """
+FROM python:3.11
+WORKDIR /app
+COPY . .
+RUN pip install -r requirements.txt
+EXPOSE 8000
+CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+"""
+                        }
+
+                        else if (env.STACK == "node") {
+                            writeFile file: 'app/Dockerfile', text: """
+FROM node:20-alpine AS build
+WORKDIR /app
+COPY . .
+RUN npm install && npm run build
+
+FROM nginx:alpine
+COPY --from=build /app/dist /usr/share/nginx/html
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+"""
+                        }
+
+                        else {
+                            writeFile file: 'app/Dockerfile', text: """
+FROM nginx:alpine
+COPY . /usr/share/nginx/html
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+"""
+                        }
+                    } else {
+                        echo "📝 Dockerfile already exists"
+                    }
                 }
             }
         }
