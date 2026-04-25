@@ -26,12 +26,16 @@ pipeline {
             }
         }
 
-        stage('Allocate Safe Port') {
+        stage('Allocate Safe Port (FIXED)') {
             steps {
                 script {
 
                     def usedPorts = sh(
-                        script: "docker ps --format '{{.Ports}}' | grep -o '[0-9]\\+->' | cut -d'>' -f1 || true",
+                        script: """
+                            docker ps --format '{{.Ports}}' \
+                            | grep -o '[0-9]\\+->' \
+                            | cut -d'>' -f1 || true
+                        """,
                         returnStdout: true
                     ).trim()
 
@@ -43,7 +47,7 @@ pipeline {
 
                     env.EXTERNAL_PORT = port.toString()
 
-                    echo "🌐 Assigned Port: ${EXTERNAL_PORT}"
+                    echo "🌐 Assigned Safe Port: ${EXTERNAL_PORT}"
                 }
             }
         }
@@ -61,36 +65,36 @@ pipeline {
             steps {
                 script {
 
-                    env.STACK = "node"
-                    env.INTERNAL_PORT = "3000"
-                    env.NEEDS_BUILD = "false"
-
                     if (fileExists('app/manage.py')) {
                         env.STACK = "django"
                         env.INTERNAL_PORT = "8000"
-                    }
 
-                    else if (fileExists('app/package.json')) {
-                        def pkg = readFile('app/package.json')
+                    } else if (fileExists('app/package.json')) {
+                        env.STACK = "node"
+                        env.INTERNAL_PORT = "3000"
 
-                        if (pkg.contains("build")) {
-                            env.NEEDS_BUILD = "true"
-                        }
+                    } else if (fileExists('app/index.php')) {
+                        env.STACK = "php"
+                        env.INTERNAL_PORT = "80"
+
+                    } else {
+                        env.STACK = "unknown"
+                        env.INTERNAL_PORT = "80"
                     }
 
                     echo "📦 Stack: ${STACK}"
-                    echo "⚙️ Needs Build: ${NEEDS_BUILD}"
+                    echo "🔌 Internal Port: ${INTERNAL_PORT}"
                 }
             }
         }
 
-        stage('Create Dockerfile (FIXED UNIVERSAL)') {
+        stage('Create Dockerfile if missing (FIXED UNIVERSAL)') {
             steps {
                 script {
 
                     if (!fileExists('app/Dockerfile')) {
 
-                        echo "🛠 Generating SAFE Dockerfile"
+                        echo "🛠 Creating AUTO Dockerfile"
 
                         if (env.STACK == "django") {
                             writeFile file: 'app/Dockerfile', text: """
@@ -103,23 +107,31 @@ CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
 """
                         }
 
-                        else {
-                            // 🔥 FIXED NODE UNIVERSAL (THIS IS THE IMPORTANT PART)
+                        else if (env.STACK == "node") {
                             writeFile file: 'app/Dockerfile', text: """
 FROM node:20-alpine
-
 WORKDIR /app
-
 COPY . .
-
-RUN npm install || true
-
-# safe build (won't crash)
-RUN npm run build || echo "No build step"
+RUN npm install
 
 EXPOSE 3000
 
-CMD ["sh", "-c", "npm start || node server.js || node index.js || node app.js || echo 'No entry file found' && sleep 3600"]
+CMD ["npm", "start"]
+"""
+                        }
+
+                        else if (env.STACK == "php") {
+                            writeFile file: 'app/Dockerfile', text: """
+FROM php:8.2-apache
+COPY . /var/www/html
+EXPOSE 80
+"""
+                        }
+
+                        else {
+                            writeFile file: 'app/Dockerfile', text: """
+FROM alpine
+CMD echo "Unknown project"
 """
                         }
                     }
@@ -131,12 +143,12 @@ CMD ["sh", "-c", "npm start || node server.js || node index.js || node app.js ||
             steps {
                 sh '''
                     cd app
-                    docker build -t auto-app:${APP_ID} .
+                    docker build -t ${IMAGE_NAME}:${APP_ID} .
                 '''
             }
         }
 
-        stage('Stop Old Container') {
+        stage('Stop Only Same App') {
             steps {
                 sh '''
                     docker stop app_${APP_ID} || true
@@ -145,7 +157,7 @@ CMD ["sh", "-c", "npm start || node server.js || node index.js || node app.js ||
             }
         }
 
-        stage('Run Container (FIXED)') {
+        stage('Run Container (FULLY PARALLEL SAFE)') {
             steps {
                 script {
 
@@ -154,7 +166,7 @@ CMD ["sh", "-c", "npm start || node server.js || node index.js || node app.js ||
                             docker run -d \
                             --name ${CONTAINER_NAME} \
                             -p ${EXTERNAL_PORT}:8000 \
-                            auto-app:${APP_ID}
+                            ${IMAGE_NAME}:${APP_ID}
                         """
                     }
 
@@ -163,7 +175,7 @@ CMD ["sh", "-c", "npm start || node server.js || node index.js || node app.js ||
                             docker run -d \
                             --name ${CONTAINER_NAME} \
                             -p ${EXTERNAL_PORT}:3000 \
-                            auto-app:${APP_ID}
+                            ${IMAGE_NAME}:${APP_ID}
                         """
                     }
                 }
@@ -180,7 +192,7 @@ CMD ["sh", "-c", "npm start || node server.js || node index.js || node app.js ||
     post {
         success {
             echo "✅ DEPLOY SUCCESS"
-            echo "🌐 OPEN: http://192.168.122.127:${EXTERNAL_PORT}"
+            echo "🌐 OPEN → http://192.168.122.127:${EXTERNAL_PORT}"
         }
 
         failure {
