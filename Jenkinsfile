@@ -154,22 +154,21 @@ CMD ["nginx", "-g", "daemon off;"]
     }
 }
 
-        stage('Deploy') {
-            steps {
-                script {
-                    def port = sh(script: "shuf -i 3000-3999 -n 1", returnStdout: true).trim()
+     stage('Deploy') {
+    steps {
+        script {
+            def port = sh(script: "shuf -i 3000-3999 -n 1", returnStdout: true).trim()
 
-                    sh """
-                        docker stop ${params.APP_NAME} || true
-                        docker rm ${params.APP_NAME} || true
-                        docker run -d -p ${port}:80 --name ${params.APP_NAME} ${IMAGE_NAME}:v1
-                    """
+            sh """
+                docker stop ${params.APP_NAME} || true
+                docker rm ${params.APP_NAME} || true
+                docker run -d -p ${port}:80 --name ${params.APP_NAME} ${IMAGE_NAME}:v1
+            """
 
-                    echo "🌐 LIVE: http://192.168.122.127:${port}"
-                }
-            }
+            echo "🌐 LIVE: http://192.168.122.127:${port}"
         }
-
+    }
+}
         stage('Verify') {
             steps {
                 sh "docker ps"
