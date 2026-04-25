@@ -169,12 +169,10 @@ CMD ["python","app.py"]
 
         stage('Push Image') {
             steps {
-                withEnv(["DOCKER_PASSWORD=${DOCKER_CREDS_PSW}"]) {
-                    sh '''
-                        echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_CREDS_USR" --password-stdin
-                        docker push '"${IMAGE_NAME}"'
-                    '''
-                }
+                sh '''
+                    echo "$DOCKER_CREDS_PSW" | docker login -u "$DOCKER_CREDS_USR" --password-stdin
+                    docker push $IMAGE_NAME
+                '''
             }
         }
 
