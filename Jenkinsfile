@@ -2,7 +2,8 @@ pipeline {
     agent any
 
     environment {
-        DOCKER_IMAGE = "raheeljamal"
+        DOCKER_USER = 'raheeljamal'
+        DOCKER_IMAGE_BASE = 'raheeljamal'
     }
 
     stages {
@@ -10,16 +11,15 @@ pipeline {
         stage('Init') {
             steps {
                 script {
-                    def APP_NAME = params.APP_NAME ?: "app-${env.BUILD_NUMBER}"
-                    def REPO_URL = params.REPO_URL
+                    env.APP_NAME = params.APP_NAME ?: "app-${env.BUILD_NUMBER}"
+                    env.REPO_URL = params.REPO_URL
 
-                    if (!REPO_URL) {
-                        error("REPO_URL is required")
+                    if (!env.REPO_URL) {
+                        error("❌ REPO_URL is required")
                     }
 
-                    env.APP_NAME = APP_NAME
-                    env.REPO_URL = REPO_URL
-                    env.CONTAINER_NAME = APP_NAME
+                    env.CONTAINER_NAME = env.APP_NAME
+                    env.WORKSPACE_DIR = "/tmp/${APP_NAME}"
 
                     echo "🚀 App: ${APP_NAME}"
                     echo "📦 Repo: ${REPO_URL}"
@@ -27,7 +27,7 @@ pipeline {
             }
         }
 
-        stage('Detect Branch (AUTO)') {
+        stage('Auto Detect Branch') {
             steps {
                 script {
                     def branches = sh(
@@ -35,16 +35,16 @@ pipeline {
                         returnStdout: true
                     ).trim()
 
-                    def branchList = branches.readLines().collect {
+                    def list = branches.readLines().collect {
                         it.split()[1].replace("refs/heads/", "")
                     }
 
-                    // AUTO SELECT FIRST AVAILABLE BRANCH
-                    def selectedBranch = branchList.find { it == "main" } ? "main" : branchList[0]
+                    def selected = list.contains("main") ? "main" :
+                                   list.contains("master") ? "master" :
+                                   list[0]
 
-                    env.BRANCH = selectedBranch
-
-                    echo "✔ Auto branch: ${env.BRANCH}"
+                    env.BRANCH = selected
+                    echo "✔ Selected branch: ${BRANCH}"
                 }
             }
         }
@@ -52,11 +52,9 @@ pipeline {
         stage('Clone Repo') {
             steps {
                 script {
-                    env.APP_DIR = "/tmp/${APP_NAME}"
-
                     sh """
-                        rm -rf ${APP_DIR}
-                        git clone --depth 1 -b ${BRANCH} ${REPO_URL} ${APP_DIR}
+                        rm -rf ${WORKSPACE_DIR}
+                        git clone --depth 1 -b ${BRANCH} ${REPO_URL} ${WORKSPACE_DIR}
                     """
                 }
             }
@@ -65,7 +63,7 @@ pipeline {
         stage('Detect Stack') {
             steps {
                 script {
-                    if (fileExists("${APP_DIR}/package.json")) {
+                    if (fileExists("${WORKSPACE_DIR}/package.json")) {
                         env.STACK = "node"
                     } else {
                         env.STACK = "unknown"
@@ -79,10 +77,10 @@ pipeline {
         stage('Prepare Dockerfile') {
             steps {
                 script {
-                    def dockerfile = "${APP_DIR}/Dockerfile"
+                    def dockerfile = "${WORKSPACE_DIR}/Dockerfile"
 
                     if (!fileExists(dockerfile)) {
-                        echo "⚠ Creating Dockerfile..."
+                        echo "⚠ No Dockerfile found → generating..."
 
                         writeFile file: dockerfile, text: """
 FROM node:20-alpine
@@ -96,6 +94,8 @@ COPY . .
 EXPOSE 3000
 CMD ["npm","start"]
 """
+                    } else {
+                        echo "✔ Dockerfile already exists"
                     }
                 }
             }
@@ -104,14 +104,14 @@ CMD ["npm","start"]
         stage('Build Image') {
             steps {
                 script {
-                    env.IMAGE_TAG = "${DOCKER_IMAGE}/${APP_NAME}:v1"
+                    env.IMAGE_NAME = "${DOCKER_IMAGE_BASE}/${APP_NAME}:v1"
 
                     sh """
-                        cd ${APP_DIR}
-                        docker build -t ${IMAGE_TAG} .
+                        cd ${WORKSPACE_DIR}
+                        docker build -t ${IMAGE_NAME} .
                     """
 
-                    echo "🐳 Built: ${IMAGE_TAG}"
+                    echo "🐳 Built: ${IMAGE_NAME}"
                 }
             }
         }
@@ -120,20 +120,20 @@ CMD ["npm","start"]
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: 'dockerhub-cred',
-                    usernameVariable: 'DOCKER_USER',
-                    passwordVariable: 'DOCKER_PASS'
+                    usernameVariable: 'USER',
+                    passwordVariable: 'PASS'
                 )]) {
                     script {
                         sh """
-                            echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin
-                            docker push ${IMAGE_TAG}
+                            echo $PASS | docker login -u $USER --password-stdin
+                            docker push ${IMAGE_NAME}
                         """
                     }
                 }
             }
         }
 
-        stage('Deploy') {
+        stage('Deploy Container') {
             steps {
                 script {
 
@@ -144,9 +144,9 @@ CMD ["npm","start"]
                         docker rm ${APP_NAME} || true
 
                         docker run -d \
-                        -p ${PORT}:3000 \
                         --name ${APP_NAME} \
-                        ${IMAGE_TAG}
+                        -p ${PORT}:3000 \
+                        ${IMAGE_NAME}
                     """
 
                     env.APP_PORT = PORT
