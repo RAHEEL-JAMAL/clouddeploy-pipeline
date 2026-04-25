@@ -9,7 +9,7 @@ pipeline {
 
     environment {
         DOCKERHUB_USER = "raheeljamal"
-        IMAGE_NAME     = "${DOCKERHUB_USER}/${params.APP_NAME}"
+        IMAGE_NAME = "raheeljamal/${params.APP_NAME}"
     }
 
     stages {
@@ -85,11 +85,12 @@ pipeline {
                               -v "$PWD/app:/app" \
                               -w /app \
                               node:20-alpine \
-                              sh -c "
-                                npm install &&
-                                npm run build
-                              "
+                              sh -c "npm install && npm run build"
                         '''
+
+                        if (!fileExists("app/dist")) {
+                            error("❌ Build failed: dist folder missing")
+                        }
 
                         echo "✅ Node build completed"
                     } else {
@@ -112,7 +113,8 @@ COPY dist/ /usr/share/nginx/html
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
 '''
-                        } 
+                        }
+
                         else if (env.STACK == "django") {
                             writeFile file: "app/Dockerfile", text: '''
 FROM python:3.9
@@ -123,6 +125,7 @@ EXPOSE 8000
 CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
 '''
                         }
+
                         else {
                             writeFile file: "app/Dockerfile", text: '''
 FROM nginx:alpine
@@ -156,10 +159,11 @@ CMD ["nginx", "-g", "daemon off;"]
                     usernameVariable: 'USER',
                     passwordVariable: 'PASS'
                 )]) {
-                    sh """
-                        echo "\$PASS" | docker login -u "\$USER" --password-stdin
+                    sh '''
+                        set -e
+                        echo "$PASS" | docker login -u "$USER" --password-stdin
                         docker push ${IMAGE_NAME}:v1
-                    """
+                    '''
                 }
             }
         }
@@ -169,16 +173,7 @@ CMD ["nginx", "-g", "daemon off;"]
                 script {
 
                     def hostPort = sh(script: "shuf -i 3000-3999 -n 1", returnStdout: true).trim()
-                    def containerPort = "80"
-
-                    // 🔥 SMART PORT FIX (IMPORTANT PART)
-                    if (env.STACK == "django") {
-                        containerPort = "8000"
-                    } else if (env.STACK == "node") {
-                        containerPort = "80"
-                    } else {
-                        containerPort = "80"
-                    }
+                    def containerPort = (env.STACK == "django") ? "8000" : "80"
 
                     echo "🧠 Mapping: ${hostPort} -> ${containerPort}"
 
