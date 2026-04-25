@@ -2,10 +2,9 @@ pipeline {
     agent any
 
     environment {
-        APP_NAME = ""
-        IMAGE_NAME = ""
-        APP_DIR = ""
-        APP_PORT = ""
+        DOCKER_IMAGE = "raheeljamal/${APP_NAME}"
+        CONTAINER_NAME = "${APP_NAME}"
+        PORT_FILE = "/tmp/${APP_NAME}_port.txt"
     }
 
     stages {
@@ -13,15 +12,11 @@ pipeline {
         stage('Init') {
             steps {
                 script {
-                    def app = "app-${env.BUILD_NUMBER}"
-                    def image = "raheeljamal/${app}:v1"
-                    def dir = "/tmp/${app}"
+                    APP_NAME = params.APP_NAME ?: "app-${env.BUILD_NUMBER}"
+                    REPO_URL = params.REPO_URL ?: "https://github.com/RAHEEL-JAMAL/dockerizing-reactjs-app.git"
 
-                    env.APP_NAME = app
-                    env.IMAGE_NAME = image
-                    env.APP_DIR = dir
-
-                    echo "🚀 App: ${app}"
+                    echo "🚀 App: ${APP_NAME}"
+                    echo "📦 Repo: ${REPO_URL}"
                 }
             }
         }
@@ -29,28 +24,28 @@ pipeline {
         stage('Detect Branch') {
             steps {
                 script {
-                    def branch = sh(
-                        script: """
-                            git ls-remote --heads https://github.com/RAHEEL-JAMAL/dockerizing-reactjs-app.git |
-                            awk '{print \$2}' | sed 's#refs/heads/##'
-                        """,
+                    def branches = sh(
+                        script: "git ls-remote --heads ${REPO_URL}",
                         returnStdout: true
                     ).trim()
 
-                    def selected = branch.split("\n")[0]
-                    env.REPO_BRANCH = selected
+                    def selectedBranch = branches.contains("main") ? "main" : "master"
+                    env.BRANCH = selectedBranch
 
-                    echo "✔ Selected branch: ${selected}"
+                    echo "✔ Auto-selected branch: ${env.BRANCH}"
                 }
             }
         }
 
         stage('Clone Repo') {
             steps {
-                sh """
-                    rm -rf ${APP_DIR}
-                    git clone --depth 1 -b ${REPO_BRANCH} https://github.com/RAHEEL-JAMAL/dockerizing-reactjs-app.git ${APP_DIR}
-                """
+                script {
+                    sh """
+                        rm -rf /tmp/${APP_NAME}
+                        git clone --depth 1 -b ${BRANCH} ${REPO_URL} /tmp/${APP_NAME}
+                    """
+                    env.APP_DIR = "/tmp/${APP_NAME}"
+                }
             }
         }
 
@@ -58,8 +53,11 @@ pipeline {
             steps {
                 script {
                     if (fileExists("${APP_DIR}/package.json")) {
-                        echo "📦 Stack: node"
+                        env.STACK = "node"
+                    } else {
+                        env.STACK = "unknown"
                     }
+                    echo "📦 Stack: ${STACK}"
                 }
             }
         }
@@ -67,20 +65,23 @@ pipeline {
         stage('Prepare Dockerfile') {
             steps {
                 script {
-                    if (!fileExists("${APP_DIR}/Dockerfile")) {
-                        echo "⚠ No Dockerfile found → generating..."
+                    def dockerfilePath = "${APP_DIR}/Dockerfile"
 
-                        def dockerfile = """
+                    if (!fileExists(dockerfilePath)) {
+                        echo "⚠ No Dockerfile found → generating optimized one..."
+
+                        writeFile file: dockerfilePath, text: """
 FROM node:20-alpine
 WORKDIR /app
+
 COPY package*.json ./
 RUN npm ci --omit=dev || npm install --omit=dev
+
 COPY . .
+
 EXPOSE 3000
 CMD ["npm","start"]
 """
-
-                        writeFile file: "${APP_DIR}/Dockerfile", text: dockerfile
                         echo "✔ Dockerfile created"
                     } else {
                         echo "✔ Dockerfile already exists"
@@ -91,27 +92,27 @@ CMD ["npm","start"]
 
         stage('Build Image') {
             steps {
-                sh """
-                    cd ${APP_DIR}
-                    docker build -t ${IMAGE_NAME} .
-                """
-                echo "🐳 Built: ${IMAGE_NAME}"
+                script {
+                    sh """
+                        cd ${APP_DIR}
+                        docker build -t ${DOCKER_IMAGE}:v1 .
+                    """
+                    echo "🐳 Built: ${DOCKER_IMAGE}:v1"
+                }
             }
         }
 
         stage('Push Image') {
             steps {
                 withCredentials([usernamePassword(
-                    credentialsId: 'dockerhub-cred',
+                    credentialsId: 'dockerhub-creds',
                     usernameVariable: 'DOCKER_USER',
                     passwordVariable: 'DOCKER_PASS'
                 )]) {
-
-                    sh '''
-                        set +x
-                        echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
-                        docker push ${IMAGE_NAME}
-                    '''
+                    sh """
+                        echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin
+                        docker push ${DOCKER_IMAGE}:v1
+                    """
                 }
             }
         }
@@ -120,46 +121,35 @@ CMD ["npm","start"]
             steps {
                 script {
 
-                    def containerPort = "3000"
-
-                    def df = readFile("${APP_DIR}/Dockerfile").toLowerCase()
-
-                    if (df.contains("nginx")) {
-                        containerPort = "80"
-                    } else if (df.contains("expose 8000")) {
-                        containerPort = "8000"
-                    } else if (df.contains("expose 5000")) {
-                        containerPort = "5000"
-                    }
-
+                    // stop old container safely
                     sh """
-                        docker stop ${APP_NAME} || true
-                        docker rm ${APP_NAME} || true
-
-                        PORT=\$(shuf -i 3000-3999 -n 1)
-
-                        docker run -d \
-                            -p \$PORT:${containerPort} \
-                            --name ${APP_NAME} \
-                            ${IMAGE_NAME}
-
-                        echo \$PORT > /tmp/${APP_NAME}_port.txt
+                        docker stop ${CONTAINER_NAME} || true
+                        docker rm ${CONTAINER_NAME} || true
                     """
 
-                    env.APP_PORT = sh(
-                        script: "cat /tmp/${APP_NAME}_port.txt",
-                        returnStdout: true
-                    ).trim()
+                    // assign random port
+                    def port = sh(script: "shuf -i 3000-3999 -n 1", returnStdout: true).trim()
+
+                    sh """
+                        docker run -d \
+                        -p ${port}:3000 \
+                        --name ${CONTAINER_NAME} \
+                        ${DOCKER_IMAGE}:v1
+                    """
+
+                    writeFile file: PORT_FILE, text: port
+                    echo "🌐 App running on port: ${port}"
                 }
             }
         }
 
         stage('Verify') {
             steps {
-                sh "docker ps | grep ${APP_NAME} || true"
-
-                echo "🌍 LIVE URL:"
-                echo "👉 http://192.168.122.127:${APP_PORT}"
+                script {
+                    def port = readFile(PORT_FILE).trim()
+                    echo "🚀 LIVE URL:"
+                    echo "👉 http://192.168.122.127:${port}"
+                }
             }
         }
     }
@@ -168,6 +158,7 @@ CMD ["npm","start"]
         success {
             echo "🚀 DEPLOYMENT SUCCESS"
         }
+
         failure {
             echo "❌ DEPLOYMENT FAILED"
         }
