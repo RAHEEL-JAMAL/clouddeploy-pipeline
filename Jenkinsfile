@@ -146,31 +146,27 @@ CMD ["nginx", "-g", "daemon off;"]
             }
         }
 
-        stage('Push Image (FIXED + RETRY)') {
-            steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'dockerhub-cred',
-                    usernameVariable: 'USER',
-                    passwordVariable: 'PASS'
-                )]) {
+       stage('Push Image') {
+    steps {
+        withCredentials([usernamePassword(
+            credentialsId: 'dockerhub-cred',
+            usernameVariable: 'USER',
+            passwordVariable: 'PASS'
+        )]) {
+            sh """
+                set -e
 
-                    sh """
-                        set -e
+                echo "\$PASS" | docker login -u "\$USER" --password-stdin
 
-                        echo "\$PASS" | docker login -u "\$USER" --password-stdin
-
-                        # 🔥 RETRY PUSH (fix Docker Hub timeout issue)
-                        for i in 1 2 3 4 5
-                        do
-                            echo "🚀 Push attempt \$i..."
-                            docker push ${env.IMAGE_NAME}:v1 && break
-                            echo "❌ Push failed, retrying in 10s..."
-                            sleep 10
-                        done
-                    """
-                }
-            }
+                # 🔥 retry logic (VERY IMPORTANT)
+                for i in 1 2 3; do
+                    echo "Push attempt $i"
+                    docker push ${IMAGE_NAME}:v1 && break || sleep 10
+                done
+            """
         }
+    }
+}
 
         stage('Deploy') {
             steps {
