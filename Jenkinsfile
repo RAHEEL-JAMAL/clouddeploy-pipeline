@@ -22,6 +22,10 @@ pipeline {
                         env.SAFE_APP = "myapp"
                     }
 
+                    if (!params.REPO_URL?.trim()) {
+                        error "REPO_URL is required"
+                    }
+
                     echo "🚀 App: ${env.SAFE_APP}"
                 }
             }
@@ -30,12 +34,10 @@ pipeline {
         stage('Detect Branch') {
             steps {
                 script {
-
                     if (params.BRANCH?.trim()) {
                         env.BRANCH_NAME = params.BRANCH.trim()
                         echo "✔ Using user branch: ${env.BRANCH_NAME}"
                     } else {
-
                         def raw = sh(
                             script: "git ls-remote --heads ${params.REPO_URL}",
                             returnStdout: true
@@ -46,6 +48,10 @@ pipeline {
                             if (line.contains("refs/heads/")) {
                                 branches.add(line.split("refs/heads/")[1].trim())
                             }
+                        }
+
+                        if (branches.isEmpty()) {
+                            error "No branches found in repository"
                         }
 
                         echo "Branches: ${branches}"
@@ -91,41 +97,54 @@ pipeline {
             }
         }
 
-        stage('Ensure Dockerfile') {
+        stage('Optimize Build Files') {
             steps {
                 script {
-
                     def path = "/tmp/${env.SAFE_APP}"
 
-                    if (!fileExists("${path}/Dockerfile")) {
+                    writeFile file: "${path}/.dockerignore", text: '''
+.git
+.gitignore
+node_modules
+npm-debug.log
+yarn.lock
+dist
+build
+coverage
+.env
+.env.*
+Dockerfile
+README.md
+'''
 
-                        echo "⚠ No Dockerfile found → generating..."
+                    echo "✔ .dockerignore created"
+
+                    if (!fileExists("${path}/Dockerfile")) {
+                        echo "⚠ No Dockerfile found → generating optimized Dockerfile..."
 
                         if (env.STACK == "node") {
-
                             writeFile file: "${path}/Dockerfile", text: '''
-FROM node:18
+FROM node:20-alpine
 WORKDIR /app
 COPY package*.json ./
-RUN npm install
+RUN npm ci --omit=dev || npm install --omit=dev
 COPY . .
 EXPOSE 3000
 CMD ["npm","start"]
 '''
-
                         } else {
-
                             writeFile file: "${path}/Dockerfile", text: '''
-FROM python:3.10
+FROM python:3.11-alpine
 WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-RUN pip install -r requirements.txt
 EXPOSE 5000
 CMD ["python","app.py"]
 '''
                         }
 
-                        echo "✔ Dockerfile created"
+                        echo "✔ Optimized Dockerfile created"
                     } else {
                         echo "✔ Dockerfile already exists"
                     }
@@ -136,7 +155,6 @@ CMD ["python","app.py"]
         stage('Build Image') {
             steps {
                 script {
-
                     env.IMAGE_NAME = "${DOCKER_CREDS_USR}/${env.SAFE_APP}:${params.DEPLOYMENT_ID}"
 
                     sh """
@@ -151,17 +169,18 @@ CMD ["python","app.py"]
 
         stage('Push Image') {
             steps {
-                sh """
-                    echo "$DOCKER_CREDS_PSW" | docker login -u "$DOCKER_CREDS_USR" --password-stdin
-                    docker push ${IMAGE_NAME}
-                """
+                withEnv(["DOCKER_PASSWORD=${DOCKER_CREDS_PSW}"]) {
+                    sh '''
+                        echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_CREDS_USR" --password-stdin
+                        docker push '"${IMAGE_NAME}"'
+                    '''
+                }
             }
         }
 
         stage('Deploy Container') {
             steps {
                 script {
-
                     sh """
                         docker stop ${env.SAFE_APP} || true
                         docker rm ${env.SAFE_APP} || true
@@ -169,9 +188,9 @@ CMD ["python","app.py"]
                         PORT=\$(shuf -i 3000-3999 -n 1)
 
                         docker run -d \
-                        -p \$PORT:3000 \
-                        --name ${env.SAFE_APP} \
-                        ${env.IMAGE_NAME}
+                          -p \$PORT:3000 \
+                          --name ${env.SAFE_APP} \
+                          ${env.IMAGE_NAME}
 
                         echo \$PORT > /tmp/${env.SAFE_APP}_port.txt
                     """
@@ -187,7 +206,6 @@ CMD ["python","app.py"]
         stage('Verify') {
             steps {
                 sh "docker ps | grep ${env.SAFE_APP} || true"
-
                 echo "🌍 LIVE URL:"
                 echo "👉 http://192.168.122.127:${env.APP_PORT}"
             }
@@ -198,7 +216,6 @@ CMD ["python","app.py"]
         success {
             echo "🚀 DEPLOYMENT SUCCESS"
         }
-
         failure {
             echo "❌ DEPLOYMENT FAILED"
         }
