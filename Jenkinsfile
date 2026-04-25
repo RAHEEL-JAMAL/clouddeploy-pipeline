@@ -9,7 +9,7 @@ pipeline {
 
     environment {
         DOCKERHUB_USER = "raheeljamal"
-        IMAGE_NAME = "${DOCKERHUB_USER}/${params.APP_NAME}"
+        IMAGE_NAME     = "${DOCKERHUB_USER}/${params.APP_NAME}"
     }
 
     stages {
@@ -28,7 +28,7 @@ pipeline {
 
                     if (params.BRANCH == "auto") {
                         def branches = sh(
-                            script: "git ls-remote --heads ${params.REPO_URL} | awk '{print \$2}' | sed 's#refs/heads/##'",
+                            script: """git ls-remote --heads ${params.REPO_URL} | awk '{print \$2}' | sed 's#refs/heads/##'""",
                             returnStdout: true
                         ).trim()
 
@@ -46,7 +46,7 @@ pipeline {
                     }
 
                     env.BRANCH = branch
-                    echo "✔ Branch: ${branch}"
+                    echo "✔ Branch: ${env.BRANCH}"
                 }
             }
         }
@@ -64,36 +64,67 @@ pipeline {
             steps {
                 script {
                     env.STACK = fileExists("app/package.json") ? "node" : "static"
-                    echo "📦 Stack: ${STACK}"
+                    echo "📦 Stack: ${env.STACK}"
                 }
             }
         }
 
-        stage('Build Frontend (SAFE)') {
+        stage('Build Frontend') {
             steps {
                 script {
                     if (env.STACK == "node") {
-                        sh """
-                            docker run --rm -v \$(pwd)/app:/app -w /app node:20 bash -c "
+                        sh '''
+                            docker run --rm \
+                              -v "$PWD/app:/app" \
+                              -w /app \
+                              node:20-alpine \
+                              sh -c "
+                                ls -la &&
+                                test -f package.json &&
                                 npm install &&
-                                npm run build || true
-                            "
-                        """
+                                npm run build
+                              "
+                        '''
+
+                        script {
+                            if (!fileExists("app/dist")) {
+                                error("❌ Frontend build failed: dist folder not found")
+                            }
+                        }
+
+                        echo "✅ Frontend build completed"
+                    } else {
+                        echo "ℹ️ Static app detected, skipping frontend build"
                     }
                 }
             }
         }
 
-        stage('Dockerfile') {
+        stage('Prepare Dockerfile') {
             steps {
                 script {
                     if (!fileExists("app/Dockerfile")) {
-                        writeFile file: "app/Dockerfile", text: """
+
+                        if (env.STACK == "node") {
+                            writeFile file: "app/Dockerfile", text: '''
+FROM nginx:alpine
+COPY dist/ /usr/share/nginx/html
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+'''
+                            echo "📝 Generated frontend Dockerfile (dist -> nginx)"
+                        } else {
+                            writeFile file: "app/Dockerfile", text: '''
 FROM nginx:alpine
 COPY . /usr/share/nginx/html
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
-"""
+'''
+                            echo "📝 Generated static Dockerfile"
+                        }
+
+                    } else {
+                        echo "📝 Existing Dockerfile found, using repo Dockerfile"
                     }
                 }
             }
@@ -115,11 +146,10 @@ CMD ["nginx", "-g", "daemon off;"]
                     usernameVariable: 'USER',
                     passwordVariable: 'PASS'
                 )]) {
-
-                    sh """
+                    sh '''
                         echo "$PASS" | docker login -u "$USER" --password-stdin
-                        docker push ${IMAGE_NAME}:v1
-                    """
+                        docker push '"${IMAGE_NAME}"':v1
+                    '''
                 }
             }
         }
