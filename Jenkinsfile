@@ -3,8 +3,6 @@ pipeline {
 
     environment {
         DOCKER_IMAGE = "raheeljamal"
-        CONTAINER_NAME = ""
-        PORT_FILE = ""
     }
 
     stages {
@@ -12,30 +10,41 @@ pipeline {
         stage('Init') {
             steps {
                 script {
-                    env.APP_NAME = params.APP_NAME ?: "app-${env.BUILD_NUMBER}"
-                    env.REPO_URL = params.REPO_URL ?: "https://github.com/RAHEEL-JAMAL/dockerizing-reactjs-app.git"
+                    def APP_NAME = params.APP_NAME ?: "app-${env.BUILD_NUMBER}"
+                    def REPO_URL = params.REPO_URL
 
-                    env.CONTAINER_NAME = env.APP_NAME
-                    env.PORT_FILE = "/tmp/${env.APP_NAME}_port.txt"
+                    if (!REPO_URL) {
+                        error("REPO_URL is required")
+                    }
 
-                    echo "🚀 App: ${env.APP_NAME}"
-                    echo "📦 Repo: ${env.REPO_URL}"
+                    env.APP_NAME = APP_NAME
+                    env.REPO_URL = REPO_URL
+                    env.CONTAINER_NAME = APP_NAME
+
+                    echo "🚀 App: ${APP_NAME}"
+                    echo "📦 Repo: ${REPO_URL}"
                 }
             }
         }
 
-        stage('Detect Branch') {
+        stage('Detect Branch (AUTO)') {
             steps {
                 script {
                     def branches = sh(
-                        script: "git ls-remote --heads ${REPO_URL} | awk '{print \$2}' | sed 's#refs/heads/##'",
+                        script: "git ls-remote --heads ${REPO_URL}",
                         returnStdout: true
                     ).trim()
 
-                    def branchList = branches.split("\n")
-                    env.BRANCH = branchList[0]
+                    def branchList = branches.readLines().collect {
+                        it.split()[1].replace("refs/heads/", "")
+                    }
 
-                    echo "✔ Auto-selected branch: ${env.BRANCH}"
+                    // AUTO SELECT FIRST AVAILABLE BRANCH
+                    def selectedBranch = branchList.find { it == "main" } ? "main" : branchList[0]
+
+                    env.BRANCH = selectedBranch
+
+                    echo "✔ Auto branch: ${env.BRANCH}"
                 }
             }
         }
@@ -43,11 +52,12 @@ pipeline {
         stage('Clone Repo') {
             steps {
                 script {
-                    sh """
-                        rm -rf /tmp/${APP_NAME}
-                        git clone --depth 1 -b ${BRANCH} ${REPO_URL} /tmp/${APP_NAME}
-                    """
                     env.APP_DIR = "/tmp/${APP_NAME}"
+
+                    sh """
+                        rm -rf ${APP_DIR}
+                        git clone --depth 1 -b ${BRANCH} ${REPO_URL} ${APP_DIR}
+                    """
                 }
             }
         }
@@ -69,24 +79,23 @@ pipeline {
         stage('Prepare Dockerfile') {
             steps {
                 script {
-                    def dockerfilePath = "${APP_DIR}/Dockerfile"
+                    def dockerfile = "${APP_DIR}/Dockerfile"
 
-                    if (!fileExists(dockerfilePath)) {
-                        writeFile file: dockerfilePath, text: """
+                    if (!fileExists(dockerfile)) {
+                        echo "⚠ Creating Dockerfile..."
+
+                        writeFile file: dockerfile, text: """
 FROM node:20-alpine
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci --omit=dev || npm install --omit=dev
+RUN npm install
 
 COPY . .
 
 EXPOSE 3000
 CMD ["npm","start"]
 """
-                        echo "✔ Dockerfile created"
-                    } else {
-                        echo "✔ Dockerfile already exists"
                     }
                 }
             }
@@ -95,14 +104,14 @@ CMD ["npm","start"]
         stage('Build Image') {
             steps {
                 script {
-                    env.IMAGE = "${DOCKER_IMAGE}/${APP_NAME}:v${BUILD_NUMBER}"
+                    env.IMAGE_TAG = "${DOCKER_IMAGE}/${APP_NAME}:v1"
 
                     sh """
                         cd ${APP_DIR}
-                        docker build -t ${IMAGE} .
+                        docker build -t ${IMAGE_TAG} .
                     """
 
-                    echo "🐳 Built: ${IMAGE}"
+                    echo "🐳 Built: ${IMAGE_TAG}"
                 }
             }
         }
@@ -115,36 +124,32 @@ CMD ["npm","start"]
                     passwordVariable: 'DOCKER_PASS'
                 )]) {
                     script {
-                        sh '''
-                            echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
-                            docker push ${IMAGE}
-                        '''
+                        sh """
+                            echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin
+                            docker push ${IMAGE_TAG}
+                        """
                     }
                 }
             }
         }
 
-        stage('Deploy Container') {
+        stage('Deploy') {
             steps {
                 script {
+
+                    def PORT = sh(script: "shuf -i 3000-3999 -n 1", returnStdout: true).trim()
 
                     sh """
                         docker stop ${APP_NAME} || true
                         docker rm ${APP_NAME} || true
-                    """
 
-                    def port = sh(script: "shuf -i 3000-3999 -n 1", returnStdout: true).trim()
-                    env.PORT = port
-
-                    sh """
                         docker run -d \
                         -p ${PORT}:3000 \
                         --name ${APP_NAME} \
-                        ${IMAGE}
+                        ${IMAGE_TAG}
                     """
 
-                    writeFile file: PORT_FILE, text: "${PORT}"
-                    echo "🌐 Running on port: ${PORT}"
+                    env.APP_PORT = PORT
                 }
             }
         }
@@ -152,10 +157,8 @@ CMD ["npm","start"]
         stage('Verify') {
             steps {
                 script {
-                    def port = readFile(PORT_FILE).trim()
-
                     echo "🚀 LIVE URL:"
-                    echo "👉 http://192.168.122.127:${port}"
+                    echo "👉 http://192.168.122.127:${APP_PORT}"
                 }
             }
         }
