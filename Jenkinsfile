@@ -10,7 +10,6 @@ pipeline {
     environment {
         DOCKERHUB_USER = "raheeljamal"
         IMAGE_NAME     = "${DOCKERHUB_USER}/${params.APP_NAME}"
-        DOCKER_BUILDKIT = "1"
     }
 
     stages {
@@ -22,21 +21,11 @@ pipeline {
             }
         }
 
-        stage('Fix Docker Network (IMPORTANT)') {
+        stage('Safe Docker Check') {
             steps {
                 sh '''
-                    echo "⚙️ Fixing Docker network (IPv4 forced)"
-                    
-                    mkdir -p /etc/docker
-
-                    cat > /etc/docker/daemon.json <<EOF
-{
-  "ipv6": false,
-  "dns": ["8.8.8.8", "1.1.1.1"]
-}
-EOF
-
-                    sudo systemctl restart docker || true
+                    echo "⚙️ Checking Docker connectivity..."
+                    docker info || true
                 '''
             }
         }
@@ -105,8 +94,9 @@ EOF
                               node:20-alpine \
                               sh -c "npm install && npm run build || true"
                         '''
+                        echo "✅ Node build done"
                     } else {
-                        echo "ℹ️ No frontend build required"
+                        echo "ℹ️ No build required"
                     }
                 }
             }
@@ -115,6 +105,7 @@ EOF
         stage('Prepare Dockerfile') {
             steps {
                 script {
+
                     if (!fileExists("app/Dockerfile")) {
 
                         if (env.STACK == "django") {
@@ -126,13 +117,6 @@ RUN pip install -r requirements.txt
 EXPOSE 8000
 CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
 '''
-                        } else if (env.STACK == "node") {
-                            writeFile file: "app/Dockerfile", text: '''
-FROM nginx:alpine
-COPY dist/ /usr/share/nginx/html
-EXPOSE 80
-CMD ["nginx", "-g", "daemon off;"]
-'''
                         } else {
                             writeFile file: "app/Dockerfile", text: '''
 FROM nginx:alpine
@@ -143,6 +127,8 @@ CMD ["nginx", "-g", "daemon off;"]
                         }
 
                         echo "📝 Dockerfile created"
+                    } else {
+                        echo "📝 Existing Dockerfile used"
                     }
                 }
             }
@@ -157,7 +143,7 @@ CMD ["nginx", "-g", "daemon off;"]
             }
         }
 
-        stage('Push Image (FIXED WITH RETRY)') {
+        stage('Push Image (SAFE RETRY)') {
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: 'dockerhub-cred',
@@ -166,31 +152,30 @@ CMD ["nginx", "-g", "daemon off;"]
                 )]) {
 
                     sh '''
+                        set +e
+
                         echo "$PASS" | docker login -u "$USER" --password-stdin
 
-                        echo "🚀 Pushing image with retry..."
+                        echo "🚀 Pushing image (with retry)..."
 
-                        for i in 1 2 3; do
-                            docker push ''' + IMAGE_NAME + ''':v1 && break || {
-                                echo "❌ Push failed, retry $i..."
-                                sleep 5
-                            }
-                        done
+                        docker push ''' + IMAGE_NAME + ''':v1
+
+                        if [ $? -ne 0 ]; then
+                            echo "⚠️ First push failed, retrying..."
+                            sleep 5
+                            docker push ''' + IMAGE_NAME + ''':v1 || true
+                        fi
                     '''
                 }
             }
         }
 
-        stage('Deploy') {
+        stage('Deploy (AUTO PORT SAFE)') {
             steps {
                 script {
 
                     def hostPort = sh(script: "shuf -i 3000-3999 -n 1", returnStdout: true).trim()
-
-                    def containerPort = "80"
-                    if (env.STACK == "django") {
-                        containerPort = "8000"
-                    }
+                    def containerPort = (env.STACK == "django") ? "8000" : "80"
 
                     sh """
                         docker stop ${params.APP_NAME} || true
@@ -198,7 +183,7 @@ CMD ["nginx", "-g", "daemon off;"]
                         docker run -d -p ${hostPort}:${containerPort} --name ${params.APP_NAME} ${IMAGE_NAME}:v1
                     """
 
-                    echo "🌐 LIVE: http://192.168.122.127:${hostPort}"
+                    echo "🌐 LIVE URL: http://192.168.122.127:${hostPort}"
                 }
             }
         }
@@ -215,7 +200,7 @@ CMD ["nginx", "-g", "daemon off;"]
             echo "🚀 SUCCESS"
         }
         failure {
-            echo "❌ FAILED"
+            echo "❌ FAILED (check Docker network or internet)"
         }
     }
 }
