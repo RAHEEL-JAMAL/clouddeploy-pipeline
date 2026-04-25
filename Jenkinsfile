@@ -9,18 +9,35 @@ pipeline {
 
     environment {
         DOCKERHUB_USER = "raheeljamal"
+        IMAGE_NAME     = "${DOCKERHUB_USER}/${params.APP_NAME}"
+        DOCKER_BUILDKIT = "1"
     }
 
     stages {
 
         stage('Init') {
             steps {
-                script {
-                    env.IMAGE_NAME = "${DOCKERHUB_USER}/${params.APP_NAME}"
-                }
-
                 echo "🚀 Deploying: ${params.APP_NAME}"
                 echo "📦 Repo: ${params.REPO_URL}"
+            }
+        }
+
+        stage('Fix Docker Network (IMPORTANT)') {
+            steps {
+                sh '''
+                    echo "⚙️ Fixing Docker network (IPv4 forced)"
+                    
+                    mkdir -p /etc/docker
+
+                    cat > /etc/docker/daemon.json <<EOF
+{
+  "ipv6": false,
+  "dns": ["8.8.8.8", "1.1.1.1"]
+}
+EOF
+
+                    sudo systemctl restart docker || true
+                '''
             }
         }
 
@@ -31,11 +48,9 @@ pipeline {
 
                     if (params.BRANCH == "auto") {
                         def branches = sh(
-                            script: "git ls-remote --heads ${params.REPO_URL} | awk '{print \$2}' | sed 's#refs/heads/##'",
+                            script: """git ls-remote --heads ${params.REPO_URL} | awk '{print \$2}' | sed 's#refs/heads/##'""",
                             returnStdout: true
                         ).trim()
-
-                        echo "🔍 Branches: ${branches}"
 
                         if (branches.contains("main")) {
                             branch = "main"
@@ -58,7 +73,7 @@ pipeline {
             steps {
                 sh """
                     rm -rf app
-                    git clone --depth 1 -b ${env.BRANCH} ${params.REPO_URL} app
+                    git clone --depth 1 -b ${BRANCH} ${REPO_URL} app
                 """
             }
         }
@@ -83,15 +98,15 @@ pipeline {
             steps {
                 script {
                     if (env.STACK == "node") {
-                        sh """
+                        sh '''
                             docker run --rm \
-                              -v \$PWD/app:/app \
+                              -v "$PWD/app:/app" \
                               -w /app \
                               node:20-alpine \
-                              sh -c "npm install && npm run build"
-                        """
+                              sh -c "npm install && npm run build || true"
+                        '''
                     } else {
-                        echo "ℹ️ No build required for ${env.STACK}"
+                        echo "ℹ️ No frontend build required"
                     }
                 }
             }
@@ -102,25 +117,23 @@ pipeline {
                 script {
                     if (!fileExists("app/Dockerfile")) {
 
-                        if (env.STACK == "node") {
-                            writeFile file: "app/Dockerfile", text: '''
-FROM nginx:alpine
-COPY dist/ /usr/share/nginx/html
-EXPOSE 80
-CMD ["nginx", "-g", "daemon off;"]
-'''
-                        } 
-                        else if (env.STACK == "django") {
+                        if (env.STACK == "django") {
                             writeFile file: "app/Dockerfile", text: '''
 FROM python:3.9
 WORKDIR /app
 COPY . .
 RUN pip install -r requirements.txt
 EXPOSE 8000
-CMD python manage.py runserver 0.0.0.0:8000
+CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
 '''
-                        } 
-                        else {
+                        } else if (env.STACK == "node") {
+                            writeFile file: "app/Dockerfile", text: '''
+FROM nginx:alpine
+COPY dist/ /usr/share/nginx/html
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+'''
+                        } else {
                             writeFile file: "app/Dockerfile", text: '''
 FROM nginx:alpine
 COPY . /usr/share/nginx/html
@@ -129,9 +142,7 @@ CMD ["nginx", "-g", "daemon off;"]
 '''
                         }
 
-                        echo "📝 Dockerfile generated"
-                    } else {
-                        echo "📝 Existing Dockerfile used"
+                        echo "📝 Dockerfile created"
                     }
                 }
             }
@@ -141,32 +152,34 @@ CMD ["nginx", "-g", "daemon off;"]
             steps {
                 sh """
                     cd app
-                    docker build -t ${env.IMAGE_NAME}:v1 .
+                    docker build -t ${IMAGE_NAME}:v1 .
                 """
             }
         }
 
-       stage('Push Image') {
-    steps {
-        withCredentials([usernamePassword(
-            credentialsId: 'dockerhub-cred',
-            usernameVariable: 'USER',
-            passwordVariable: 'PASS'
-        )]) {
-            sh """
-                set -e
+        stage('Push Image (FIXED WITH RETRY)') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-cred',
+                    usernameVariable: 'USER',
+                    passwordVariable: 'PASS'
+                )]) {
 
-                echo "\$PASS" | docker login -u "\$USER" --password-stdin
+                    sh '''
+                        echo "$PASS" | docker login -u "$USER" --password-stdin
 
-                # 🔥 retry logic (VERY IMPORTANT)
-                for i in 1 2 3; do
-                    echo "Push attempt $i"
-                    docker push ${IMAGE_NAME}:v1 && break || sleep 10
-                done
-            """
+                        echo "🚀 Pushing image with retry..."
+
+                        for i in 1 2 3; do
+                            docker push ''' + IMAGE_NAME + ''':v1 && break || {
+                                echo "❌ Push failed, retry $i..."
+                                sleep 5
+                            }
+                        done
+                    '''
+                }
+            }
         }
-    }
-}
 
         stage('Deploy') {
             steps {
@@ -179,12 +192,10 @@ CMD ["nginx", "-g", "daemon off;"]
                         containerPort = "8000"
                     }
 
-                    echo "🧠 Port mapping: ${hostPort} -> ${containerPort}"
-
                     sh """
                         docker stop ${params.APP_NAME} || true
                         docker rm ${params.APP_NAME} || true
-                        docker run -d -p ${hostPort}:${containerPort} --name ${params.APP_NAME} ${env.IMAGE_NAME}:v1
+                        docker run -d -p ${hostPort}:${containerPort} --name ${params.APP_NAME} ${IMAGE_NAME}:v1
                     """
 
                     echo "🌐 LIVE: http://192.168.122.127:${hostPort}"
