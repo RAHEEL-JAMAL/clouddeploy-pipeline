@@ -4,22 +4,24 @@ pipeline {
     environment {
         IMAGE_NAME = "auto-app"
         IMAGE_TAG = "latest"
-        CONTAINER_NAME = "auto_container"
     }
 
     stages {
 
         stage('Init') {
             steps {
-                echo "🚀 AUTO DEPLOY PIPELINE STARTED"
+                echo "🚀 MULTI APP AUTO DEPLOY STARTED"
             }
         }
 
         stage('Input Repo') {
             steps {
                 script {
-                    env.REPO_URL = params.REPO_URL ?: "https://github.com/RAHEEL-JAMAL/LondheShubham153-django-notes-app.git"
+                    env.REPO_URL = params.REPO_URL
+                    env.APP_ID = sh(script: "echo ${REPO_URL} | md5sum | cut -c1-6", returnStdout: true).trim()
+
                     echo "📦 Repo: ${env.REPO_URL}"
+                    echo "🆔 App ID: ${env.APP_ID}"
                 }
             }
         }
@@ -33,28 +35,40 @@ pipeline {
             }
         }
 
-        stage('Detect Stack') {
+        stage('Detect Stack + Port') {
             steps {
                 script {
+
                     if (fileExists('app/manage.py')) {
                         env.STACK = "django"
                         env.INTERNAL_PORT = "8000"
-                    } 
-                    else if (fileExists('app/package.json')) {
+                        env.EXTERNAL_PORT = "8000"
+
+                    } else if (fileExists('app/package.json')) {
                         env.STACK = "node"
                         env.INTERNAL_PORT = "80"
-                    } 
-                    else if (fileExists('app/index.php')) {
+
+                    } else if (fileExists('app/index.php')) {
                         env.STACK = "php"
                         env.INTERNAL_PORT = "80"
-                    }
-                    else {
+
+                    } else {
                         env.STACK = "unknown"
                         env.INTERNAL_PORT = "80"
                     }
 
-                    echo "📦 Stack: ${env.STACK}"
-                    echo "🔌 Internal Port: ${env.INTERNAL_PORT}"
+                    // AUTO PORT GENERATION (NO CONFLICT)
+                    env.EXTERNAL_PORT = sh(
+                        script: "echo \$((3000 + RANDOM % 500))",
+                        returnStdout: true
+                    ).trim()
+
+                    env.CONTAINER_NAME = "app_${APP_ID}"
+
+                    echo "📦 Stack: ${STACK}"
+                    echo "🔌 Internal: ${INTERNAL_PORT}"
+                    echo "🌐 External: ${EXTERNAL_PORT}"
+                    echo "📦 Container: ${CONTAINER_NAME}"
                 }
             }
         }
@@ -66,10 +80,10 @@ pipeline {
                         sh '''
                             cd app
                             npm install
-                            npm run build || echo "No build step required"
+                            npm run build || true
                         '''
                     } else {
-                        echo "ℹ️ No build step required"
+                        echo "ℹ️ No build required"
                     }
                 }
             }
@@ -80,8 +94,6 @@ pipeline {
                 script {
 
                     if (!fileExists('app/Dockerfile')) {
-
-                        echo "🛠 Creating AUTO Dockerfile"
 
                         if (env.STACK == "django") {
                             writeFile file: 'app/Dockerfile', text: """
@@ -115,15 +127,6 @@ COPY . /var/www/html
 EXPOSE 80
 """
                         }
-
-                        else {
-                            writeFile file: 'app/Dockerfile', text: """
-FROM alpine
-CMD echo "Unknown project"
-"""
-                        }
-                    } else {
-                        echo "📝 Dockerfile already exists"
                     }
                 }
             }
@@ -133,42 +136,40 @@ CMD echo "Unknown project"
             steps {
                 sh '''
                     cd app
-                    export DOCKER_BUILDKIT=0
-                    docker build -t auto-app:latest .
+                    docker build -t ${IMAGE_NAME}:${APP_ID} .
                 '''
             }
         }
 
-        stage('Stop Old Container') {
+        stage('Stop Old Container (Same App Only)') {
             steps {
                 sh '''
-                    docker stop auto_container || true
-                    docker rm auto_container || true
+                    docker stop app_${APP_ID} || true
+                    docker rm app_${APP_ID} || true
                 '''
             }
         }
 
-        stage('Run Container (FIXED PORT LOGIC)') {
+        stage('Run Container (MULTI APP SAFE)') {
             steps {
                 script {
 
                     if (env.STACK == "django") {
-                        sh '''
+                        sh """
                             docker run -d \
-                            --name auto_container \
-                            -p 8000:8000 \
-                            auto-app:latest
-                        '''
+                            --name ${CONTAINER_NAME} \
+                            -p ${EXTERNAL_PORT}:8000 \
+                            ${IMAGE_NAME}:${APP_ID}
+                        """
                     }
 
                     else {
-                        // IMPORTANT FIX: React + PHP + Nginx all use port 80 inside container
-                        sh '''
+                        sh """
                             docker run -d \
-                            --name auto_container \
-                            -p 3000:80 \
-                            auto-app:latest
-                        '''
+                            --name ${CONTAINER_NAME} \
+                            -p ${EXTERNAL_PORT}:80 \
+                            ${IMAGE_NAME}:${APP_ID}
+                        """
                     }
                 }
             }
@@ -176,24 +177,19 @@ CMD echo "Unknown project"
 
         stage('Verify') {
             steps {
-                sh '''
-                    echo "🔍 Running Containers:"
-                    docker ps
-                '''
+                sh 'docker ps'
             }
         }
-
     }
 
     post {
         success {
-            echo "✅ AUTO DEPLOY SUCCESS"
-            echo "🌐 Django → http://VM_IP:8000"
-            echo "🌐 Other Apps → http://VM_IP:3000"
+            echo "✅ DEPLOY SUCCESS"
+            echo "🌐 App URL: http://VM_IP:${EXTERNAL_PORT}"
         }
 
         failure {
-            echo "❌ DEPLOY FAILED — check logs"
+            echo "❌ FAILED"
         }
     }
 }
