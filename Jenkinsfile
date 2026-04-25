@@ -4,7 +4,7 @@ pipeline {
     parameters {
         string(name: 'APP_NAME', defaultValue: 'myapp', description: 'App name')
         string(name: 'REPO_URL', defaultValue: '', description: 'Git repo URL')
-        string(name: 'BRANCH', defaultValue: 'auto', description: 'Branch auto/master/main')
+        string(name: 'BRANCH', defaultValue: 'auto', description: 'auto / main / master')
     }
 
     environment {
@@ -17,46 +17,59 @@ pipeline {
         stage('Init') {
             steps {
                 echo "🚀 Deploying: ${params.APP_NAME}"
-                echo "📦 Repo: ${params.REPO_URL}"
             }
         }
 
-        stage('Detect Branch SAFE') {
+        stage('Detect Branch (FIXED SAFE)') {
             steps {
                 script {
-                    def branch = "main"
 
-                    if (params.BRANCH == "auto") {
+                    def branches = sh(
+                        script: "git ls-remote --heads ${params.REPO_URL} | awk '{print \$2}' | sed 's#refs/heads/##'",
+                        returnStdout: true
+                    ).trim()
 
-                        def branches = sh(
-                            script: "git ls-remote --heads ${params.REPO_URL} | awk '{print \$2}' | sed 's#refs/heads/##'",
-                            returnStdout: true
-                        ).trim()
+                    echo "🔍 Available branches: ${branches}"
+
+                    def selected = "master"
+
+                    if (params.BRANCH != "auto") {
+                        selected = params.BRANCH
+                    } else {
 
                         if (branches.contains("main")) {
-                            branch = "main"
+                            selected = "main"
                         } else if (branches.contains("master")) {
-                            branch = "master"
+                            selected = "master"
                         } else {
-                            branch = branches.tokenize("\n")[0]
+                            selected = branches.tokenize("\n")[0]
                         }
-
-                    } else {
-                        branch = params.BRANCH
                     }
 
-                    env.BRANCH = branch
-                    echo "✔ Using branch: ${branch}"
+                    env.BRANCH = selected
+                    echo "✔ FINAL BRANCH: ${env.BRANCH}"
                 }
             }
         }
 
-        stage('Clone Repo SAFE') {
+        stage('Clone Repo (SAFE GUARANTEED)') {
             steps {
                 script {
                     sh """
                         rm -rf app
-                        git clone --depth 1 -b ${BRANCH} ${REPO_URL} app
+
+                        # TRY selected branch
+                        git clone --depth 1 -b ${BRANCH} ${REPO_URL} app || (
+
+                            echo "⚠ Clone failed, trying fallback master..."
+
+                            git clone --depth 1 -b master ${REPO_URL} app || (
+
+                                echo "⚠ Master failed, trying default branch..."
+
+                                git clone --depth 1 ${REPO_URL} app
+                            )
+                        )
                     """
                 }
             }
@@ -70,12 +83,13 @@ pipeline {
                     } else {
                         env.STACK = "static"
                     }
+
                     echo "📦 Stack: ${STACK}"
                 }
             }
         }
 
-        stage('Build Frontend SAFE') {
+        stage('Build (SAFE NODE)') {
             steps {
                 script {
                     if (env.STACK == "node") {
@@ -89,14 +103,12 @@ pipeline {
             }
         }
 
-        stage('Dockerfile SAFE') {
+        stage('Dockerfile FIXED') {
             steps {
                 script {
-                    def dockerfile = "app/Dockerfile"
+                    if (!fileExists("app/Dockerfile")) {
 
-                    if (!fileExists(dockerfile)) {
-
-                        writeFile file: dockerfile, text: """
+                        writeFile file: "app/Dockerfile", text: """
 FROM nginx:alpine
 COPY . /usr/share/nginx/html
 EXPOSE 80
@@ -138,9 +150,9 @@ CMD ["nginx", "-g", "daemon off;"]
                     def port = sh(script: "shuf -i 3000-3999 -n 1", returnStdout: true).trim()
 
                     sh """
-                        docker stop ${params.APP_NAME} || true
-                        docker rm ${params.APP_NAME} || true
-                        docker run -d -p ${port}:80 --name ${params.APP_NAME} ${IMAGE_NAME}:v1
+                        docker stop ${APP_NAME} || true
+                        docker rm ${APP_NAME} || true
+                        docker run -d -p ${port}:80 --name ${APP_NAME} ${IMAGE_NAME}:v1
                     """
 
                     echo "🌐 LIVE: http://192.168.122.127:${port}"
@@ -152,15 +164,6 @@ CMD ["nginx", "-g", "daemon off;"]
             steps {
                 sh "docker ps"
             }
-        }
-    }
-
-    post {
-        success {
-            echo "🚀 SUCCESS"
-        }
-        failure {
-            echo "❌ FAILED"
         }
     }
 }
