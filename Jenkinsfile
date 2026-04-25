@@ -21,19 +21,18 @@ pipeline {
             }
         }
 
-        stage('Detect Branch SAFE') {
+        stage('Detect Branch') {
             steps {
                 script {
                     def branch = "main"
 
                     if (params.BRANCH == "auto") {
-
                         def branches = sh(
                             script: "git ls-remote --heads ${params.REPO_URL} | awk '{print \$2}' | sed 's#refs/heads/##'",
                             returnStdout: true
                         ).trim()
 
-                        echo "🔍 Available branches: ${branches}"
+                        echo "🔍 Branches: ${branches}"
 
                         if (branches.contains("main")) {
                             branch = "main"
@@ -47,12 +46,12 @@ pipeline {
                     }
 
                     env.BRANCH = branch
-                    echo "✔ FINAL BRANCH: ${branch}"
+                    echo "✔ Branch: ${branch}"
                 }
             }
         }
 
-        stage('Clone Repo SAFE') {
+        stage('Clone Repo') {
             steps {
                 sh """
                     rm -rf app
@@ -64,22 +63,16 @@ pipeline {
         stage('Detect Stack') {
             steps {
                 script {
-                    if (fileExists("app/package.json")) {
-                        env.STACK = "node"
-                    } else {
-                        env.STACK = "static"
-                    }
-
+                    env.STACK = fileExists("app/package.json") ? "node" : "static"
                     echo "📦 Stack: ${STACK}"
                 }
             }
         }
 
-        stage('Build Frontend SAFE (FIXED NODE ISSUE)') {
+        stage('Build Frontend (SAFE)') {
             steps {
                 script {
                     if (env.STACK == "node") {
-
                         sh """
                             docker run --rm -v \$(pwd)/app:/app -w /app node:20 bash -c "
                                 npm install &&
@@ -91,20 +84,14 @@ pipeline {
             }
         }
 
-        stage('Dockerfile SAFE') {
+        stage('Dockerfile') {
             steps {
                 script {
-                    def dockerfile = "app/Dockerfile"
-
-                    if (!fileExists(dockerfile)) {
-
-                        writeFile file: dockerfile, text: """
+                    if (!fileExists("app/Dockerfile")) {
+                        writeFile file: "app/Dockerfile", text: """
 FROM nginx:alpine
-
 COPY . /usr/share/nginx/html
-
 EXPOSE 80
-
 CMD ["nginx", "-g", "daemon off;"]
 """
                     }
@@ -112,11 +99,11 @@ CMD ["nginx", "-g", "daemon off;"]
             }
         }
 
-        stage('Build Image SAFE') {
+        stage('Build Image') {
             steps {
                 sh """
                     cd app
-                    docker build --no-cache -t ${IMAGE_NAME}:v1 .
+                    docker build -t ${IMAGE_NAME}:v1 .
                 """
             }
         }
@@ -131,4 +118,41 @@ CMD ["nginx", "-g", "daemon off;"]
 
                     sh """
                         echo "$PASS" | docker login -u "$USER" --password-stdin
-                        docker push ${IMAGE_NAME}:v
+                        docker push ${IMAGE_NAME}:v1
+                    """
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                script {
+                    def port = sh(script: "shuf -i 3000-3999 -n 1", returnStdout: true).trim()
+
+                    sh """
+                        docker stop ${params.APP_NAME} || true
+                        docker rm ${params.APP_NAME} || true
+                        docker run -d -p ${port}:80 --name ${params.APP_NAME} ${IMAGE_NAME}:v1
+                    """
+
+                    echo "🌐 LIVE: http://192.168.122.127:${port}"
+                }
+            }
+        }
+
+        stage('Verify') {
+            steps {
+                sh "docker ps"
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "🚀 SUCCESS"
+        }
+        failure {
+            echo "❌ FAILED"
+        }
+    }
+}
