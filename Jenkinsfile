@@ -4,14 +4,12 @@ pipeline {
     parameters {
         string(name: 'APP_NAME', defaultValue: 'myapp', description: 'App name')
         string(name: 'REPO_URL', defaultValue: '', description: 'Git repo URL')
-        string(name: 'BRANCH', defaultValue: 'main', description: 'Branch name')
+        string(name: 'BRANCH', defaultValue: 'auto', description: 'Branch auto/master/main')
     }
 
     environment {
         DOCKERHUB_USER = "raheeljamal"
         IMAGE_NAME = "${DOCKERHUB_USER}/${params.APP_NAME}"
-        CONTAINER_NAME = "${params.APP_NAME}"
-        DEPLOY_PORT = "8080"
     }
 
     stages {
@@ -23,12 +21,44 @@ pipeline {
             }
         }
 
-        stage('Clone Repo') {
+        stage('Detect Branch SAFE') {
             steps {
-                sh """
-                    rm -rf app
-                    git clone --depth 1 -b ${params.BRANCH} ${params.REPO_URL} app
-                """
+                script {
+                    def branch = "main"
+
+                    if (params.BRANCH == "auto") {
+
+                        def branches = sh(
+                            script: "git ls-remote --heads ${params.REPO_URL} | awk '{print \$2}' | sed 's#refs/heads/##'",
+                            returnStdout: true
+                        ).trim()
+
+                        if (branches.contains("main")) {
+                            branch = "main"
+                        } else if (branches.contains("master")) {
+                            branch = "master"
+                        } else {
+                            branch = branches.tokenize("\n")[0]
+                        }
+
+                    } else {
+                        branch = params.BRANCH
+                    }
+
+                    env.BRANCH = branch
+                    echo "✔ Using branch: ${branch}"
+                }
+            }
+        }
+
+        stage('Clone Repo SAFE') {
+            steps {
+                script {
+                    sh """
+                        rm -rf app
+                        git clone --depth 1 -b ${BRANCH} ${REPO_URL} app
+                    """
+                }
             }
         }
 
@@ -40,12 +70,12 @@ pipeline {
                     } else {
                         env.STACK = "static"
                     }
-                    echo "📦 Stack detected: ${STACK}"
+                    echo "📦 Stack: ${STACK}"
                 }
             }
         }
 
-        stage('Build Frontend (SAFE VITE FIX)') {
+        stage('Build Frontend SAFE') {
             steps {
                 script {
                     if (env.STACK == "node") {
@@ -59,69 +89,61 @@ pipeline {
             }
         }
 
-        stage('Prepare Dockerfile (FIXED)') {
+        stage('Dockerfile SAFE') {
             steps {
                 script {
-                    def dockerfilePath = "app/Dockerfile"
+                    def dockerfile = "app/Dockerfile"
 
-                    if (!fileExists(dockerfilePath)) {
+                    if (!fileExists(dockerfile)) {
 
-                        if (env.STACK == "node") {
-                            writeFile file: dockerfilePath, text: """
-FROM nginx:alpine
-COPY dist /usr/share/nginx/html
-EXPOSE 80
-CMD ["nginx", "-g", "daemon off;"]
-"""
-                        } else {
-                            writeFile file: dockerfilePath, text: """
+                        writeFile file: dockerfile, text: """
 FROM nginx:alpine
 COPY . /usr/share/nginx/html
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
 """
-                        }
                     }
                 }
             }
         }
 
-        stage('Build Docker Image (SAFE MODE)') {
+        stage('Build Image') {
             steps {
                 sh """
                     cd app
-                    docker build --no-cache -t ${IMAGE_NAME}:v1 .
+                    docker build -t ${IMAGE_NAME}:v1 .
                 """
             }
         }
 
-        stage('Push Image (FIXED CREDENTIALS)') {
+        stage('Push Image') {
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: 'dockerhub-cred',
-                    usernameVariable: 'DOCKER_USER',
-                    passwordVariable: 'DOCKER_PASS'
+                    usernameVariable: 'USER',
+                    passwordVariable: 'PASS'
                 )]) {
 
                     sh """
-                        echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                        echo "$PASS" | docker login -u "$USER" --password-stdin
                         docker push ${IMAGE_NAME}:v1
                     """
                 }
             }
         }
 
-        stage('Deploy Container (FIXED PORT)') {
+        stage('Deploy') {
             steps {
                 script {
+                    def port = sh(script: "shuf -i 3000-3999 -n 1", returnStdout: true).trim()
+
                     sh """
-                        docker stop ${CONTAINER_NAME} || true
-                        docker rm ${CONTAINER_NAME} || true
-                        docker run -d -p ${DEPLOY_PORT}:80 --name ${CONTAINER_NAME} ${IMAGE_NAME}:v1
+                        docker stop ${params.APP_NAME} || true
+                        docker rm ${params.APP_NAME} || true
+                        docker run -d -p ${port}:80 --name ${params.APP_NAME} ${IMAGE_NAME}:v1
                     """
 
-                    echo "🌐 App Running:"
-                    echo "👉 http://192.168.122.127:${DEPLOY_PORT}"
+                    echo "🌐 LIVE: http://192.168.122.127:${port}"
                 }
             }
         }
@@ -135,10 +157,10 @@ CMD ["nginx", "-g", "daemon off;"]
 
     post {
         success {
-            echo "🚀 DEPLOYMENT SUCCESS"
+            echo "🚀 SUCCESS"
         }
         failure {
-            echo "❌ DEPLOYMENT FAILED"
+            echo "❌ FAILED"
         }
     }
 }
