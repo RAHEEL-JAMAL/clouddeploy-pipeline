@@ -18,7 +18,6 @@ pipeline {
                 script {
                     env.REPO_URL = params.REPO_URL
                     env.APP_ID = sh(script: "echo ${REPO_URL} | md5sum | cut -c1-6", returnStdout: true).trim()
-
                     env.CONTAINER_NAME = "app_${APP_ID}"
 
                     echo "📦 Repo: ${REPO_URL}"
@@ -62,31 +61,44 @@ pipeline {
             steps {
                 script {
 
+                    env.STACK = "unknown"
+                    env.INTERNAL_PORT = "80"
+                    env.NEEDS_BUILD = "false"
+
                     if (fileExists('app/manage.py')) {
                         env.STACK = "django"
                         env.INTERNAL_PORT = "8000"
+                    }
 
-                    } else if (fileExists('app/package.json')) {
+                    else if (fileExists('app/package.json')) {
                         env.STACK = "node"
                         env.INTERNAL_PORT = "80"
 
-                    } else {
-                        env.STACK = "static"
+                        def pkg = readFile('app/package.json')
+                        if (pkg.contains("build")) {
+                            env.NEEDS_BUILD = "true"
+                        }
+                    }
+
+                    else if (fileExists('app/index.php')) {
+                        env.STACK = "php"
                         env.INTERNAL_PORT = "80"
                     }
 
                     echo "📦 Stack: ${STACK}"
+                    echo "🔌 Internal Port: ${INTERNAL_PORT}"
+                    echo "⚙️ Needs Build: ${NEEDS_BUILD}"
                 }
             }
         }
 
-        stage('Auto Create Dockerfile (IMPORTANT FIX)') {
+        stage('Create Dockerfile if missing') {
             steps {
                 script {
 
                     if (!fileExists('app/Dockerfile')) {
 
-                        echo "🛠 No Dockerfile found → generating one"
+                        echo "🛠 Creating AUTO Dockerfile"
 
                         if (env.STACK == "django") {
                             writeFile file: 'app/Dockerfile', text: """
@@ -101,28 +113,35 @@ CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
 
                         else if (env.STACK == "node") {
                             writeFile file: 'app/Dockerfile', text: """
-FROM node:20-alpine AS build
+FROM node:20-alpine
 WORKDIR /app
 COPY . .
-RUN npm install && npm run build
 
-FROM nginx:alpine
-COPY --from=build /app/dist /usr/share/nginx/html
+RUN npm install
+
+# SAFE BUILD (won't crash if missing)
+RUN npm run build || echo "No build step found"
+
 EXPOSE 80
-CMD ["nginx", "-g", "daemon off;"]
+
+CMD ["sh", "-c", "npm start || node server.js || node app.js || node index.js"]
+"""
+                        }
+
+                        else if (env.STACK == "php") {
+                            writeFile file: 'app/Dockerfile', text: """
+FROM php:8.2-apache
+COPY . /var/www/html
+EXPOSE 80
 """
                         }
 
                         else {
                             writeFile file: 'app/Dockerfile', text: """
-FROM nginx:alpine
-COPY . /usr/share/nginx/html
-EXPOSE 80
-CMD ["nginx", "-g", "daemon off;"]
+FROM alpine
+CMD echo "Unknown project"
 """
                         }
-                    } else {
-                        echo "📝 Dockerfile already exists"
                     }
                 }
             }
@@ -132,7 +151,7 @@ CMD ["nginx", "-g", "daemon off;"]
             steps {
                 sh '''
                     cd app
-                    docker build -t ${IMAGE_NAME}:${APP_ID} .
+                    docker build -t auto-app:${APP_ID} .
                 '''
             }
         }
@@ -155,7 +174,7 @@ CMD ["nginx", "-g", "daemon off;"]
                             docker run -d \
                             --name ${CONTAINER_NAME} \
                             -p ${EXTERNAL_PORT}:8000 \
-                            ${IMAGE_NAME}:${APP_ID}
+                            auto-app:${APP_ID}
                         """
                     }
 
@@ -164,7 +183,7 @@ CMD ["nginx", "-g", "daemon off;"]
                             docker run -d \
                             --name ${CONTAINER_NAME} \
                             -p ${EXTERNAL_PORT}:80 \
-                            ${IMAGE_NAME}:${APP_ID}
+                            auto-app:${APP_ID}
                         """
                     }
                 }
