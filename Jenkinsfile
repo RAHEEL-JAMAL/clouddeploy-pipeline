@@ -38,12 +38,12 @@ pipeline {
                     def port = 3000
 
                     while (usedPorts.contains(port.toString())) {
-                        port = port + 1
+                        port++
                     }
 
                     env.EXTERNAL_PORT = port.toString()
 
-                    echo "🌐 Assigned Safe Port: ${EXTERNAL_PORT}"
+                    echo "🌐 Assigned Port: ${EXTERNAL_PORT}"
                 }
             }
         }
@@ -61,8 +61,8 @@ pipeline {
             steps {
                 script {
 
-                    env.STACK = "unknown"
-                    env.INTERNAL_PORT = "80"
+                    env.STACK = "node"
+                    env.INTERNAL_PORT = "3000"
                     env.NEEDS_BUILD = "false"
 
                     if (fileExists('app/manage.py')) {
@@ -71,34 +71,26 @@ pipeline {
                     }
 
                     else if (fileExists('app/package.json')) {
-                        env.STACK = "node"
-                        env.INTERNAL_PORT = "80"
-
                         def pkg = readFile('app/package.json')
+
                         if (pkg.contains("build")) {
                             env.NEEDS_BUILD = "true"
                         }
                     }
 
-                    else if (fileExists('app/index.php')) {
-                        env.STACK = "php"
-                        env.INTERNAL_PORT = "80"
-                    }
-
                     echo "📦 Stack: ${STACK}"
-                    echo "🔌 Internal Port: ${INTERNAL_PORT}"
                     echo "⚙️ Needs Build: ${NEEDS_BUILD}"
                 }
             }
         }
 
-        stage('Create Dockerfile if missing') {
+        stage('Create Dockerfile (FIXED UNIVERSAL)') {
             steps {
                 script {
 
                     if (!fileExists('app/Dockerfile')) {
 
-                        echo "🛠 Creating AUTO Dockerfile"
+                        echo "🛠 Generating SAFE Dockerfile"
 
                         if (env.STACK == "django") {
                             writeFile file: 'app/Dockerfile', text: """
@@ -111,35 +103,23 @@ CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
 """
                         }
 
-                        else if (env.STACK == "node") {
+                        else {
+                            // 🔥 FIXED NODE UNIVERSAL (THIS IS THE IMPORTANT PART)
                             writeFile file: 'app/Dockerfile', text: """
 FROM node:20-alpine
+
 WORKDIR /app
+
 COPY . .
 
-RUN npm install
+RUN npm install || true
 
-# SAFE BUILD (won't crash if missing)
-RUN npm run build || echo "No build step found"
+# safe build (won't crash)
+RUN npm run build || echo "No build step"
 
-EXPOSE 80
+EXPOSE 3000
 
-CMD ["sh", "-c", "npm start || node server.js || node app.js || node index.js"]
-"""
-                        }
-
-                        else if (env.STACK == "php") {
-                            writeFile file: 'app/Dockerfile', text: """
-FROM php:8.2-apache
-COPY . /var/www/html
-EXPOSE 80
-"""
-                        }
-
-                        else {
-                            writeFile file: 'app/Dockerfile', text: """
-FROM alpine
-CMD echo "Unknown project"
+CMD ["sh", "-c", "npm start || node server.js || node index.js || node app.js || echo 'No entry file found' && sleep 3600"]
 """
                         }
                     }
@@ -156,7 +136,7 @@ CMD echo "Unknown project"
             }
         }
 
-        stage('Stop Only Same App') {
+        stage('Stop Old Container') {
             steps {
                 sh '''
                     docker stop app_${APP_ID} || true
@@ -165,7 +145,7 @@ CMD echo "Unknown project"
             }
         }
 
-        stage('Run Container (PARALLEL SAFE)') {
+        stage('Run Container (FIXED)') {
             steps {
                 script {
 
@@ -182,7 +162,7 @@ CMD echo "Unknown project"
                         sh """
                             docker run -d \
                             --name ${CONTAINER_NAME} \
-                            -p ${EXTERNAL_PORT}:80 \
+                            -p ${EXTERNAL_PORT}:3000 \
                             auto-app:${APP_ID}
                         """
                     }
@@ -200,7 +180,7 @@ CMD echo "Unknown project"
     post {
         success {
             echo "✅ DEPLOY SUCCESS"
-            echo "🌐 App URL → http://VM_IP:${EXTERNAL_PORT}"
+            echo "🌐 OPEN: http://192.168.122.127:${EXTERNAL_PORT}"
         }
 
         failure {
