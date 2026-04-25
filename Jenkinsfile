@@ -2,9 +2,9 @@ pipeline {
     agent any
 
     environment {
-        DOCKER_IMAGE = "raheeljamal/${APP_NAME}"
-        CONTAINER_NAME = "${APP_NAME}"
-        PORT_FILE = "/tmp/${APP_NAME}_port.txt"
+        DOCKER_IMAGE = "raheeljamal"
+        CONTAINER_NAME = ""
+        PORT_FILE = ""
     }
 
     stages {
@@ -12,11 +12,14 @@ pipeline {
         stage('Init') {
             steps {
                 script {
-                    APP_NAME = params.APP_NAME ?: "app-${env.BUILD_NUMBER}"
-                    REPO_URL = params.REPO_URL ?: "https://github.com/RAHEEL-JAMAL/dockerizing-reactjs-app.git"
+                    env.APP_NAME = params.APP_NAME ?: "app-${env.BUILD_NUMBER}"
+                    env.REPO_URL = params.REPO_URL ?: "https://github.com/RAHEEL-JAMAL/dockerizing-reactjs-app.git"
 
-                    echo "🚀 App: ${APP_NAME}"
-                    echo "📦 Repo: ${REPO_URL}"
+                    env.CONTAINER_NAME = env.APP_NAME
+                    env.PORT_FILE = "/tmp/${env.APP_NAME}_port.txt"
+
+                    echo "🚀 App: ${env.APP_NAME}"
+                    echo "📦 Repo: ${env.REPO_URL}"
                 }
             }
         }
@@ -25,12 +28,12 @@ pipeline {
             steps {
                 script {
                     def branches = sh(
-                        script: "git ls-remote --heads ${REPO_URL}",
+                        script: "git ls-remote --heads ${REPO_URL} | awk '{print \$2}' | sed 's#refs/heads/##'",
                         returnStdout: true
                     ).trim()
 
-                    def selectedBranch = branches.contains("main") ? "main" : "master"
-                    env.BRANCH = selectedBranch
+                    def branchList = branches.split("\n")
+                    env.BRANCH = branchList[0]
 
                     echo "✔ Auto-selected branch: ${env.BRANCH}"
                 }
@@ -57,6 +60,7 @@ pipeline {
                     } else {
                         env.STACK = "unknown"
                     }
+
                     echo "📦 Stack: ${STACK}"
                 }
             }
@@ -68,8 +72,6 @@ pipeline {
                     def dockerfilePath = "${APP_DIR}/Dockerfile"
 
                     if (!fileExists(dockerfilePath)) {
-                        echo "⚠ No Dockerfile found → generating optimized one..."
-
                         writeFile file: dockerfilePath, text: """
 FROM node:20-alpine
 WORKDIR /app
@@ -93,11 +95,14 @@ CMD ["npm","start"]
         stage('Build Image') {
             steps {
                 script {
+                    env.IMAGE = "${DOCKER_IMAGE}/${APP_NAME}:v${BUILD_NUMBER}"
+
                     sh """
                         cd ${APP_DIR}
-                        docker build -t ${DOCKER_IMAGE}:v1 .
+                        docker build -t ${IMAGE} .
                     """
-                    echo "🐳 Built: ${DOCKER_IMAGE}:v1"
+
+                    echo "🐳 Built: ${IMAGE}"
                 }
             }
         }
@@ -105,14 +110,16 @@ CMD ["npm","start"]
         stage('Push Image') {
             steps {
                 withCredentials([usernamePassword(
-                    credentialsId: 'dockerhub-creds',
+                    credentialsId: 'dockerhub-cred',
                     usernameVariable: 'DOCKER_USER',
                     passwordVariable: 'DOCKER_PASS'
                 )]) {
-                    sh """
-                        echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin
-                        docker push ${DOCKER_IMAGE}:v1
-                    """
+                    script {
+                        sh '''
+                            echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                            docker push ${IMAGE}
+                        '''
+                    }
                 }
             }
         }
@@ -121,24 +128,23 @@ CMD ["npm","start"]
             steps {
                 script {
 
-                    // stop old container safely
                     sh """
-                        docker stop ${CONTAINER_NAME} || true
-                        docker rm ${CONTAINER_NAME} || true
+                        docker stop ${APP_NAME} || true
+                        docker rm ${APP_NAME} || true
                     """
 
-                    // assign random port
                     def port = sh(script: "shuf -i 3000-3999 -n 1", returnStdout: true).trim()
+                    env.PORT = port
 
                     sh """
                         docker run -d \
-                        -p ${port}:3000 \
-                        --name ${CONTAINER_NAME} \
-                        ${DOCKER_IMAGE}:v1
+                        -p ${PORT}:3000 \
+                        --name ${APP_NAME} \
+                        ${IMAGE}
                     """
 
-                    writeFile file: PORT_FILE, text: port
-                    echo "🌐 App running on port: ${port}"
+                    writeFile file: PORT_FILE, text: "${PORT}"
+                    echo "🌐 Running on port: ${PORT}"
                 }
             }
         }
@@ -147,6 +153,7 @@ CMD ["npm","start"]
             steps {
                 script {
                     def port = readFile(PORT_FILE).trim()
+
                     echo "🚀 LIVE URL:"
                     echo "👉 http://192.168.122.127:${port}"
                 }
@@ -158,7 +165,6 @@ CMD ["npm","start"]
         success {
             echo "🚀 DEPLOYMENT SUCCESS"
         }
-
         failure {
             echo "❌ DEPLOYMENT FAILED"
         }
