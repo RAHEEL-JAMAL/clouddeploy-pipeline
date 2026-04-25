@@ -1,10 +1,10 @@
+
 pipeline {
     agent any
 
     environment {
         IMAGE_NAME = "raheeljamal/fyp-pipeline"
         CONTAINER_NAME = "fyp-app"
-        PORT = "80"
         DOCKER_CREDS = "dockerhub-cred"
     }
 
@@ -12,9 +12,7 @@ pipeline {
 
         stage("Init") {
             steps {
-                script {
-                    echo "🚀 Project: ${JOB_NAME}"
-                }
+                echo "🚀 Starting Deployment Pipeline"
             }
         }
 
@@ -27,56 +25,54 @@ pipeline {
             }
         }
 
-        stage("Build Image (FIXED - NO BUILDKIT)") {
+        stage("Build Docker Image (FIXED SAFE)") {
             steps {
                 sh '''
                     cd app
 
+                    # FIXED Dockerfile (NO INLINE NGNIX ERRORS)
                     cat > Dockerfile << 'EOF'
-# ---------- BUILD ----------
+# ---------- BUILD STAGE ----------
 FROM node:20-alpine AS build
 WORKDIR /app
-
 COPY . .
 RUN npm install && npm run build
 
-# ---------- RUN ----------
+# ---------- PRODUCTION STAGE ----------
 FROM nginx:alpine
 
-# Clean default nginx files
 RUN rm -rf /usr/share/nginx/html/*
 
-# Copy build output
 COPY --from=build /app/dist /usr/share/nginx/html
 
-# FIX SPA ROUTING + FIX 404 + FIX MIME ISSUES
-RUN printf 'server {\n\
-    listen 80;\n\
-    server_name localhost;\n\
-    root /usr/share/nginx/html;\n\
-    index index.html;\n\
-\n\
-    location / {\n\
-        try_files $uri $uri/ /index.html;\n\
-    }\n\
-\n\
-    location ~* \\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2)$ {\n\
-        expires 1y;\n\
-        add_header Cache-Control "public, immutable";\n\
-    }\n\
-}\n' > /etc/nginx/conf.d/default.conf
+# SAFE nginx config (no Groovy issues, no parsing issues)
+RUN echo "server {
+    listen 80;
+    server_name localhost;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    location / {
+        try_files \$uri \$uri/ /index.html;
+    }
+
+    location ~* \\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2)$ {
+        expires 1y;
+        add_header Cache-Control \"public, immutable\";
+    }
+}" > /etc/nginx/conf.d/default.conf
 
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
 EOF
 
-                    # IMPORTANT FIX: NO BUILDKIT (avoids your crash)
                     docker build --no-cache -t $IMAGE_NAME:v1 .
                 '''
             }
         }
 
-        stage("Push Image (SAFE)") {
+        stage("Push Image") {
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: "${DOCKER_CREDS}",
@@ -91,7 +87,7 @@ EOF
             }
         }
 
-        stage("Deploy Container (FIXED PORT + CLEAN)") {
+        stage("Deploy Container") {
             steps {
                 sh '''
                     docker stop $CONTAINER_NAME || true
@@ -108,10 +104,8 @@ EOF
 
         stage("Verify") {
             steps {
-                script {
-                    echo "🚀 APP RUNNING"
-                    echo "👉 http://192.168.122.127"
-                }
+                echo "🚀 APP LIVE"
+                echo "👉 http://192.168.122.127"
             }
         }
     }
