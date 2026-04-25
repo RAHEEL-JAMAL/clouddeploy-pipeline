@@ -1,110 +1,96 @@
-
 pipeline {
     agent any
 
+    parameters {
+        string(name: 'REPO_URL', defaultValue: 'https://github.com/RAHEEL-JAMAL/portfolio-website.git', description: 'Git Repo URL')
+        string(name: 'APP_NAME', defaultValue: 'myapp', description: 'App Name')
+        string(name: 'IMAGE_TAG', defaultValue: 'v1', description: 'Docker Image Tag')
+    }
+
     environment {
-        IMAGE_NAME = "raheeljamal/fyp-pipeline"
-        CONTAINER_NAME = "fyp-app"
-        DOCKER_CREDS = "dockerhub-cred"
+        DOCKERHUB_USER = 'raheeljamal'
+        IMAGE_NAME = "${DOCKERHUB_USER}/${params.APP_NAME}"
     }
 
     stages {
 
-        stage("Init") {
+        stage('Init') {
             steps {
-                echo "🚀 Starting Deployment Pipeline"
+                echo "🚀 Deploying: ${params.APP_NAME}"
+                echo "📦 Repo: ${params.REPO_URL}"
             }
         }
 
-        stage("Clone Repo") {
+        stage('Clone Repo') {
             steps {
-                sh '''
+                sh """
                     rm -rf app
-                    git clone --depth 1 https://github.com/RAHEEL-JAMAL/portfolio-website.git app
-                '''
+                    git clone --depth 1 ${params.REPO_URL} app
+                """
             }
         }
 
-        stage("Build Docker Image (FIXED SAFE)") {
+        stage('Fix Frontend (SAFE NGINX ROUTING)') {
             steps {
                 sh '''
                     cd app
 
-                    # FIXED Dockerfile (NO INLINE NGNIX ERRORS)
-                    cat > Dockerfile << 'EOF'
-# ---------- BUILD STAGE ----------
-FROM node:20-alpine AS build
-WORKDIR /app
-COPY . .
-RUN npm install && npm run build
-
-# ---------- PRODUCTION STAGE ----------
+                    # FIX: prevent vite/svg/mime issues
+                    if [ ! -f Dockerfile ]; then
+                        cat > Dockerfile << 'EOF'
 FROM nginx:alpine
-
-RUN rm -rf /usr/share/nginx/html/*
-
-COPY --from=build /app/dist /usr/share/nginx/html
-
-# SAFE nginx config (no Groovy issues, no parsing issues)
-RUN echo "server {
-    listen 80;
-    server_name localhost;
-
-    root /usr/share/nginx/html;
-    index index.html;
-
-    location / {
-        try_files \$uri \$uri/ /index.html;
-    }
-
-    location ~* \\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2)$ {
-        expires 1y;
-        add_header Cache-Control \"public, immutable\";
-    }
-}" > /etc/nginx/conf.d/default.conf
-
+COPY dist /usr/share/nginx/html
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
 EOF
-
-                    docker build --no-cache -t $IMAGE_NAME:v1 .
+                    fi
                 '''
             }
         }
 
-        stage("Push Image") {
+        stage('Build Image (STABLE MODE)') {
+            steps {
+                sh """
+                    cd app
+
+                    # IMPORTANT: disable BuildKit to avoid buildx issues
+                    DOCKER_BUILDKIT=0 docker build -t ${IMAGE_NAME}:${params.IMAGE_TAG} .
+                """
+            }
+        }
+
+        stage('Push Image (FIXED CREDENTIALS)') {
             steps {
                 withCredentials([usernamePassword(
-                    credentialsId: "${DOCKER_CREDS}",
+                    credentialsId: 'dockerhub-cred',
                     usernameVariable: 'USER',
                     passwordVariable: 'PASS'
                 )]) {
-                    sh '''
+                    sh """
                         echo "$PASS" | docker login -u "$USER" --password-stdin
-                        docker push $IMAGE_NAME:v1
-                    '''
+                        docker push ${IMAGE_NAME}:${params.IMAGE_TAG}
+                    """
                 }
             }
         }
 
-        stage("Deploy Container") {
+        stage('Deploy Container (CLEAN + FIXED PORT)') {
             steps {
-                sh '''
-                    docker stop $CONTAINER_NAME || true
-                    docker rm $CONTAINER_NAME || true
+                sh """
+                    docker stop ${params.APP_NAME} || true
+                    docker rm ${params.APP_NAME} || true
 
                     docker run -d \
-                        --name $CONTAINER_NAME \
+                        --name ${params.APP_NAME} \
                         -p 80:80 \
-                        --restart unless-stopped \
-                        $IMAGE_NAME:v1
-                '''
+                        ${IMAGE_NAME}:${params.IMAGE_TAG}
+                """
             }
         }
 
-        stage("Verify") {
+        stage('Verify') {
             steps {
-                echo "🚀 APP LIVE"
+                echo "🌐 APP LIVE:"
                 echo "👉 http://192.168.122.127"
             }
         }
@@ -112,7 +98,7 @@ EOF
 
     post {
         success {
-            echo "✅ DEPLOYMENT SUCCESS"
+            echo "🚀 DEPLOYMENT SUCCESS"
         }
         failure {
             echo "❌ DEPLOYMENT FAILED"
