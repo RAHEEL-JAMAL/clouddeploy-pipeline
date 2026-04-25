@@ -30,18 +30,19 @@ pipeline {
             steps {
                 script {
 
-                    def used = sh(
+                    def usedPorts = sh(
                         script: "docker ps --format '{{.Ports}}' | grep -o '[0-9]*->' | cut -d'-' -f1 || true",
                         returnStdout: true
                     ).trim()
 
                     def port = 3000
 
-                    while (used.contains(port.toString())) {
+                    while (usedPorts.contains(port.toString())) {
                         port++
                     }
 
                     env.EXTERNAL_PORT = port.toString()
+
                     echo "🌐 SAFE PORT: ${EXTERNAL_PORT}"
                 }
             }
@@ -56,7 +57,7 @@ pipeline {
             }
         }
 
-        stage('Detect Stack (FIXED LOGIC)') {
+        stage('Detect Stack (FIXED)') {
             steps {
                 script {
 
@@ -64,17 +65,14 @@ pipeline {
                         env.STACK = "django"
 
                     } else if (fileExists('app/package.json')) {
-                        
+
                         def pkg = readFile('app/package.json')
 
-                        if (pkg.contains("vite") || fileExists('app/vite.config.js')) {
+                        if (pkg.contains("vite")) {
                             env.STACK = "vite"
                         } else {
                             env.STACK = "node"
                         }
-
-                    } else if (fileExists('app/index.php')) {
-                        env.STACK = "php"
 
                     } else {
                         env.STACK = "node"
@@ -85,14 +83,14 @@ pipeline {
             }
         }
 
-        stage('Create Dockerfile (FIXED UNIVERSAL)') {
+        stage('Create Dockerfile (100% FIXED)') {
             steps {
                 script {
 
                     if (!fileExists('app/Dockerfile')) {
 
-                        // 🔵 DJANGO
                         if (env.STACK == "django") {
+
                             writeFile file: 'app/Dockerfile', text: """
 FROM python:3.11
 WORKDIR /app
@@ -101,22 +99,9 @@ RUN pip install -r requirements.txt || true
 EXPOSE 8000
 CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
 """
-                        }
 
-                        // 🟢 NODE SERVER (chatcord, express, socket.io)
-                        else if (env.STACK == "node") {
-                            writeFile file: 'app/Dockerfile', text: """
-FROM node:20-alpine
-WORKDIR /app
-COPY . .
-RUN npm install || true
-EXPOSE 3000
-CMD ["npm", "start"]
-"""
-                        }
+                        } else if (env.STACK == "vite") {
 
-                        // 🟡 VITE / REACT STATIC
-                        else if (env.STACK == "vite") {
                             writeFile file: 'app/Dockerfile', text: """
 FROM node:20-alpine AS build
 WORKDIR /app
@@ -129,14 +114,22 @@ COPY --from=build /app/dist /usr/share/nginx/html
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
 """
-                        }
 
-                        // 🟠 PHP
-                        else {
+                        } else {
+
+                            // 🔥 FIXED NODE UNIVERSAL (IMPORTANT)
                             writeFile file: 'app/Dockerfile', text: """
-FROM php:8.2-apache
-COPY . /var/www/html
-EXPOSE 80
+FROM node:20-alpine
+WORKDIR /app
+COPY . .
+
+RUN npm install || true
+
+ENV PORT=3000
+
+EXPOSE 3000
+
+CMD sh -c "PORT=3000 node server.js || PORT=3000 node index.js || PORT=3000 npm start || PORT=3000 node app.js"
 """
                         }
                     }
@@ -162,34 +155,36 @@ EXPOSE 80
             }
         }
 
-        stage('Run Container (FIXED PORT LOGIC)') {
+        stage('Run Container (FIXED FINAL)') {
             steps {
                 script {
 
                     if (env.STACK == "django") {
-                        sh """
-                            docker run -d \
-                            --name ${CONTAINER_NAME} \
-                            -p ${EXTERNAL_PORT}:8000 \
-                            auto-app:${APP_ID}
-                        """
-                    }
 
-                    else if (env.STACK == "vite") {
                         sh """
-                            docker run -d \
-                            --name ${CONTAINER_NAME} \
-                            -p ${EXTERNAL_PORT}:80 \
-                            auto-app:${APP_ID}
+                        docker run -d \
+                        --name ${CONTAINER_NAME} \
+                        -p ${EXTERNAL_PORT}:8000 \
+                        auto-app:${APP_ID}
                         """
-                    }
 
-                    else {
+                    } else if (env.STACK == "vite") {
+
                         sh """
-                            docker run -d \
-                            --name ${CONTAINER_NAME} \
-                            -p ${EXTERNAL_PORT}:3000 \
-                            auto-app:${APP_ID}
+                        docker run -d \
+                        --name ${CONTAINER_NAME} \
+                        -p ${EXTERNAL_PORT}:80 \
+                        auto-app:${APP_ID}
+                        """
+
+                    } else {
+
+                        // 🔥 ALL NODE APPS FIXED HERE
+                        sh """
+                        docker run -d \
+                        --name ${CONTAINER_NAME} \
+                        -p ${EXTERNAL_PORT}:3000 \
+                        auto-app:${APP_ID}
                         """
                     }
                 }
@@ -206,11 +201,11 @@ EXPOSE 80
     post {
         success {
             echo "✅ DEPLOY SUCCESS"
-            echo "🌐 OPEN IN BROWSER → http://YOUR_VM_IP:${EXTERNAL_PORT}"
+            echo "🌐 OPEN → http://192.168.122.127:${EXTERNAL_PORT}"
         }
 
         failure {
-            echo "❌ DEPLOY FAILED"
+            echo "❌ DEPLOY FAILED (CHECK LOGS)"
         }
     }
 }
