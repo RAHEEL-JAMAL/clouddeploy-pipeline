@@ -2,9 +2,15 @@ pipeline {
     agent any
 
     environment {
-        DOCKER_BUILDKIT = "0"
-        REGISTRY = "raheeljamal"
-        PORT = ""
+        DOCKERHUB_USER = "raheeljamal"
+        IMAGE_NAME = "${DOCKERHUB_USER}/${APP_NAME}"
+        CONTAINER_NAME = "${APP_NAME}"
+    }
+
+    parameters {
+        string(name: 'APP_NAME', defaultValue: 'myapp', description: 'App name')
+        string(name: 'REPO_URL', defaultValue: '', description: 'Git repo URL')
+        string(name: 'BRANCH', defaultValue: 'auto', description: 'Branch name (auto optional)')
     }
 
     stages {
@@ -12,10 +18,8 @@ pipeline {
         stage('Init') {
             steps {
                 script {
-                    env.APP_NAME = params.APP_NAME ?: "myapp"
-                    env.REPO_URL = params.REPO_URL
-                    echo "🚀 App: ${APP_NAME}"
-                    echo "📦 Repo: ${REPO_URL}"
+                    echo "🚀 App: ${params.APP_NAME}"
+                    echo "📦 Repo: ${params.REPO_URL}"
                 }
             }
         }
@@ -23,18 +27,22 @@ pipeline {
         stage('Detect Branch') {
             steps {
                 script {
-                    def branch = sh(
-                        script: "git ls-remote --heads ${REPO_URL} | awk '{print \$2}' | sed 's#refs/heads/##' | head -n 1",
-                        returnStdout: true
-                    ).trim()
-
-                    env.BRANCH = branch ?: "main"
-                    echo "✔ Using branch: ${BRANCH}"
+                    def branch = "main"
+                    if (params.BRANCH == "auto") {
+                        branch = sh(
+                            script: "git ls-remote --heads ${params.REPO_URL} | awk '{print \$2}' | sed 's#refs/heads/##' | head -n 1",
+                            returnStdout: true
+                        ).trim()
+                    } else {
+                        branch = params.BRANCH
+                    }
+                    env.BRANCH = branch
+                    echo "✔ Using branch: ${branch}"
                 }
             }
         }
 
-        stage('Clone Repo (FAST)') {
+        stage('Clone Repo') {
             steps {
                 sh """
                     rm -rf /tmp/${APP_NAME}
@@ -59,81 +67,81 @@ pipeline {
         stage('Prepare Dockerfile') {
             steps {
                 script {
-                    def dockerfile = "/tmp/${APP_NAME}/Dockerfile"
+                    def path = "/tmp/${APP_NAME}/Dockerfile"
 
-                    if (!fileExists(dockerfile)) {
+                    if (!fileExists(path)) {
                         echo "⚠ No Dockerfile → creating default"
-                        writeFile file: dockerfile, text: """
-FROM node:20-alpine as build
-WORKDIR /app
-COPY . .
-RUN npm install && npm run build
 
-FROM nginx:alpine
-COPY --from=build /app/dist /usr/share/nginx/html
-EXPOSE 80
-CMD ["nginx", "-g", "daemon off;"]
-"""
+                        writeFile file: path, text: """
+                        FROM nginx:alpine
+                        COPY . /usr/share/nginx/html
+                        EXPOSE 80
+                        CMD ["nginx", "-g", "daemon off;"]
+                        """
                     } else {
-                        echo "✔ Dockerfile already exists"
+                        echo "✔ Dockerfile exists"
                     }
                 }
             }
         }
 
-        stage('Build Image (FAST FIXED)') {
+        stage('Build Image') {
             steps {
                 sh """
                     cd /tmp/${APP_NAME}
-                    DOCKER_BUILDKIT=0 docker build -t ${REGISTRY}/${APP_NAME}:v${BUILD_NUMBER} .
+                    DOCKER_BUILDKIT=0 docker build --no-cache -t ${IMAGE_NAME}:v1 .
                 """
-                echo "🐳 Image built"
+                echo "🐳 Built: ${IMAGE_NAME}:v1"
             }
         }
 
-        stage('Push Image (SAFE LOGIN FIXED)') {
+        stage('Push Image') {
             steps {
-                withCredentials([string(credentialsId: 'docker-pass', variable: 'DOCKER_PASS')]) {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-cred',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+
                     sh '''
-                        echo "$DOCKER_PASS" | docker login -u raheeljamal --password-stdin
-                        docker push raheeljamal/${APP_NAME}:v${BUILD_NUMBER}
+                        echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                        docker push ${IMAGE_NAME}:v1
                     '''
                 }
             }
         }
 
-        stage('Deploy Container (FAST PORT AUTO)') {
+        stage('Deploy Container') {
             steps {
                 script {
-                    env.PORT = sh(script: "shuf -i 3000-3999 -n 1", returnStdout: true).trim()
+                    def port = sh(script: "shuf -i 3000-3999 -n 1", returnStdout: true).trim()
 
                     sh """
                         docker stop ${APP_NAME} || true
                         docker rm ${APP_NAME} || true
-
-                        docker run -d \
-                        -p ${PORT}:80 \
-                        --name ${APP_NAME} \
-                        ${REGISTRY}/${APP_NAME}:v${BUILD_NUMBER}
+                        docker run -d -p ${port}:80 --name ${APP_NAME} ${IMAGE_NAME}:v1
                     """
+
+                    env.PORT = port
+                    echo "🌐 Running on: http://192.168.122.127:${port}"
                 }
             }
         }
 
         stage('Verify') {
             steps {
-                echo "🚀 DEPLOY SUCCESS"
-                echo "👉 LIVE URL: http://192.168.122.127:${PORT}"
+                echo "🚀 LIVE URL:"
+                echo "👉 http://192.168.122.127:${PORT}"
             }
         }
     }
 
     post {
         success {
-            echo "🚀 Pipeline SUCCESS"
+            echo "🚀 DEPLOYMENT SUCCESS"
         }
         failure {
-            echo "❌ Pipeline FAILED"
+            echo "❌ DEPLOYMENT FAILED"
         }
     }
 }
