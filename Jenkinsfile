@@ -63,7 +63,14 @@ pipeline {
         stage('Detect Stack') {
             steps {
                 script {
-                    env.STACK = fileExists("app/package.json") ? "node" : "static"
+                    if (fileExists("app/manage.py")) {
+                        env.STACK = "django"
+                    } else if (fileExists("app/package.json")) {
+                        env.STACK = "node"
+                    } else {
+                        env.STACK = "static"
+                    }
+
                     echo "📦 Stack: ${env.STACK}"
                 }
             }
@@ -79,22 +86,14 @@ pipeline {
                               -w /app \
                               node:20-alpine \
                               sh -c "
-                                ls -la &&
-                                test -f package.json &&
                                 npm install &&
                                 npm run build
                               "
                         '''
 
-                        script {
-                            if (!fileExists("app/dist")) {
-                                error("❌ Frontend build failed: dist folder not found")
-                            }
-                        }
-
-                        echo "✅ Frontend build completed"
+                        echo "✅ Node build completed"
                     } else {
-                        echo "ℹ️ Static app detected, skipping frontend build"
+                        echo "ℹ️ No build required for ${env.STACK}"
                     }
                 }
             }
@@ -103,6 +102,7 @@ pipeline {
         stage('Prepare Dockerfile') {
             steps {
                 script {
+
                     if (!fileExists("app/Dockerfile")) {
 
                         if (env.STACK == "node") {
@@ -112,19 +112,29 @@ COPY dist/ /usr/share/nginx/html
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
 '''
-                            echo "📝 Generated frontend Dockerfile (dist -> nginx)"
-                        } else {
+                        } 
+                        else if (env.STACK == "django") {
+                            writeFile file: "app/Dockerfile", text: '''
+FROM python:3.9
+WORKDIR /app
+COPY . .
+RUN pip install -r requirements.txt
+EXPOSE 8000
+CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+'''
+                        }
+                        else {
                             writeFile file: "app/Dockerfile", text: '''
 FROM nginx:alpine
 COPY . /usr/share/nginx/html
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
 '''
-                            echo "📝 Generated static Dockerfile"
                         }
 
+                        echo "📝 Dockerfile generated for ${env.STACK}"
                     } else {
-                        echo "📝 Existing Dockerfile found, using repo Dockerfile"
+                        echo "📝 Existing Dockerfile used"
                     }
                 }
             }
@@ -139,36 +149,50 @@ CMD ["nginx", "-g", "daemon off;"]
             }
         }
 
-       stage('Push Image') {
-    steps {
-        withCredentials([usernamePassword(
-            credentialsId: 'dockerhub-cred',
-            usernameVariable: 'USER',
-            passwordVariable: 'PASS'
-        )]) {
-            sh """
-                echo "\$PASS" | docker login -u "\$USER" --password-stdin
-                docker push ${IMAGE_NAME}:v1
-            """
+        stage('Push Image') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-cred',
+                    usernameVariable: 'USER',
+                    passwordVariable: 'PASS'
+                )]) {
+                    sh """
+                        echo "\$PASS" | docker login -u "\$USER" --password-stdin
+                        docker push ${IMAGE_NAME}:v1
+                    """
+                }
+            }
         }
-    }
-}
 
-     stage('Deploy') {
-    steps {
-        script {
-            def port = sh(script: "shuf -i 3000-3999 -n 1", returnStdout: true).trim()
+        stage('Deploy') {
+            steps {
+                script {
 
-            sh """
-                docker stop ${params.APP_NAME} || true
-                docker rm ${params.APP_NAME} || true
-                docker run -d -p ${port}:80 --name ${params.APP_NAME} ${IMAGE_NAME}:v1
-            """
+                    def hostPort = sh(script: "shuf -i 3000-3999 -n 1", returnStdout: true).trim()
+                    def containerPort = "80"
 
-            echo "🌐 LIVE: http://192.168.122.127:${port}"
+                    // 🔥 SMART PORT FIX (IMPORTANT PART)
+                    if (env.STACK == "django") {
+                        containerPort = "8000"
+                    } else if (env.STACK == "node") {
+                        containerPort = "80"
+                    } else {
+                        containerPort = "80"
+                    }
+
+                    echo "🧠 Mapping: ${hostPort} -> ${containerPort}"
+
+                    sh """
+                        docker stop ${params.APP_NAME} || true
+                        docker rm ${params.APP_NAME} || true
+                        docker run -d -p ${hostPort}:${containerPort} --name ${params.APP_NAME} ${IMAGE_NAME}:v1
+                    """
+
+                    echo "🌐 LIVE: http://192.168.122.127:${hostPort}"
+                }
+            }
         }
-    }
-}
+
         stage('Verify') {
             steps {
                 sh "docker ps"
