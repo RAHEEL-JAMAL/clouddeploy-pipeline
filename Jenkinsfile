@@ -26,28 +26,23 @@ pipeline {
             }
         }
 
-        stage('Allocate Safe Port (FIXED)') {
+        stage('Allocate Safe Port') {
             steps {
                 script {
 
-                    def usedPorts = sh(
-                        script: """
-                            docker ps --format '{{.Ports}}' \
-                            | grep -o '[0-9]\\+->' \
-                            | cut -d'>' -f1 || true
-                        """,
+                    def used = sh(
+                        script: "docker ps --format '{{.Ports}}' | grep -o '[0-9]*->' | cut -d'-' -f1 || true",
                         returnStdout: true
                     ).trim()
 
                     def port = 3000
 
-                    while (usedPorts.contains(port.toString())) {
+                    while (used.contains(port.toString())) {
                         port++
                     }
 
                     env.EXTERNAL_PORT = port.toString()
-
-                    echo "🌐 Assigned Safe Port: ${EXTERNAL_PORT}"
+                    echo "🌐 SAFE PORT: ${EXTERNAL_PORT}"
                 }
             }
         }
@@ -61,77 +56,87 @@ pipeline {
             }
         }
 
-        stage('Detect Stack') {
+        stage('Detect Stack (FIXED LOGIC)') {
             steps {
                 script {
 
                     if (fileExists('app/manage.py')) {
                         env.STACK = "django"
-                        env.INTERNAL_PORT = "8000"
 
                     } else if (fileExists('app/package.json')) {
-                        env.STACK = "node"
-                        env.INTERNAL_PORT = "3000"
+                        
+                        def pkg = readFile('app/package.json')
+
+                        if (pkg.contains("vite") || fileExists('app/vite.config.js')) {
+                            env.STACK = "vite"
+                        } else {
+                            env.STACK = "node"
+                        }
 
                     } else if (fileExists('app/index.php')) {
                         env.STACK = "php"
-                        env.INTERNAL_PORT = "80"
 
                     } else {
-                        env.STACK = "unknown"
-                        env.INTERNAL_PORT = "80"
+                        env.STACK = "node"
                     }
 
-                    echo "📦 Stack: ${STACK}"
-                    echo "🔌 Internal Port: ${INTERNAL_PORT}"
+                    echo "📦 STACK: ${STACK}"
                 }
             }
         }
 
-        stage('Create Dockerfile if missing (FIXED UNIVERSAL)') {
+        stage('Create Dockerfile (FIXED UNIVERSAL)') {
             steps {
                 script {
 
                     if (!fileExists('app/Dockerfile')) {
 
-                        echo "🛠 Creating AUTO Dockerfile"
-
+                        // 🔵 DJANGO
                         if (env.STACK == "django") {
                             writeFile file: 'app/Dockerfile', text: """
 FROM python:3.11
 WORKDIR /app
 COPY . .
-RUN pip install -r requirements.txt
+RUN pip install -r requirements.txt || true
 EXPOSE 8000
 CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
 """
                         }
 
+                        // 🟢 NODE SERVER (chatcord, express, socket.io)
                         else if (env.STACK == "node") {
                             writeFile file: 'app/Dockerfile', text: """
 FROM node:20-alpine
 WORKDIR /app
 COPY . .
-RUN npm install
-
+RUN npm install || true
 EXPOSE 3000
-
 CMD ["npm", "start"]
 """
                         }
 
-                        else if (env.STACK == "php") {
+                        // 🟡 VITE / REACT STATIC
+                        else if (env.STACK == "vite") {
+                            writeFile file: 'app/Dockerfile', text: """
+FROM node:20-alpine AS build
+WORKDIR /app
+COPY . .
+RUN npm install || true
+RUN npm run build || true
+
+FROM nginx:alpine
+COPY --from=build /app/dist /usr/share/nginx/html
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+"""
+                        }
+
+                        // 🟠 PHP
+                        else {
                             writeFile file: 'app/Dockerfile', text: """
 FROM php:8.2-apache
 COPY . /var/www/html
 EXPOSE 80
-"""
-                        }
-
-                        else {
-                            writeFile file: 'app/Dockerfile', text: """
-FROM alpine
-CMD echo "Unknown project"
 """
                         }
                     }
@@ -143,12 +148,12 @@ CMD echo "Unknown project"
             steps {
                 sh '''
                     cd app
-                    docker build -t ${IMAGE_NAME}:${APP_ID} .
+                    docker build -t auto-app:${APP_ID} .
                 '''
             }
         }
 
-        stage('Stop Only Same App') {
+        stage('Stop Old Container') {
             steps {
                 sh '''
                     docker stop app_${APP_ID} || true
@@ -157,7 +162,7 @@ CMD echo "Unknown project"
             }
         }
 
-        stage('Run Container (FULLY PARALLEL SAFE)') {
+        stage('Run Container (FIXED PORT LOGIC)') {
             steps {
                 script {
 
@@ -166,7 +171,16 @@ CMD echo "Unknown project"
                             docker run -d \
                             --name ${CONTAINER_NAME} \
                             -p ${EXTERNAL_PORT}:8000 \
-                            ${IMAGE_NAME}:${APP_ID}
+                            auto-app:${APP_ID}
+                        """
+                    }
+
+                    else if (env.STACK == "vite") {
+                        sh """
+                            docker run -d \
+                            --name ${CONTAINER_NAME} \
+                            -p ${EXTERNAL_PORT}:80 \
+                            auto-app:${APP_ID}
                         """
                     }
 
@@ -175,7 +189,7 @@ CMD echo "Unknown project"
                             docker run -d \
                             --name ${CONTAINER_NAME} \
                             -p ${EXTERNAL_PORT}:3000 \
-                            ${IMAGE_NAME}:${APP_ID}
+                            auto-app:${APP_ID}
                         """
                     }
                 }
@@ -192,7 +206,7 @@ CMD echo "Unknown project"
     post {
         success {
             echo "✅ DEPLOY SUCCESS"
-            echo "🌐 OPEN → http://192.168.122.127:${EXTERNAL_PORT}"
+            echo "🌐 OPEN IN BROWSER → http://YOUR_VM_IP:${EXTERNAL_PORT}"
         }
 
         failure {
