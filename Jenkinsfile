@@ -13,11 +13,15 @@ pipeline {
         stage('Init') {
             steps {
                 script {
-                    APP_NAME = "app-" + env.BUILD_NUMBER
-                    IMAGE_NAME = "raheeljamal/${APP_NAME}:v1"
-                    APP_DIR = "/tmp/${APP_NAME}"
+                    def app = "app-${env.BUILD_NUMBER}"
+                    def image = "raheeljamal/${app}:v1"
+                    def dir = "/tmp/${app}"
 
-                    echo "🚀 App: ${APP_NAME}"
+                    env.APP_NAME = app
+                    env.IMAGE_NAME = image
+                    env.APP_DIR = dir
+
+                    echo "🚀 App: ${app}"
                 }
             }
         }
@@ -26,14 +30,17 @@ pipeline {
             steps {
                 script {
                     def branch = sh(
-                        script: "git ls-remote --heads https://github.com/RAHEEL-JAMAL/dockerizing-reactjs-app.git | awk '{print \$2}' | sed 's#refs/heads/##'",
+                        script: """
+                            git ls-remote --heads https://github.com/RAHEEL-JAMAL/dockerizing-reactjs-app.git |
+                            awk '{print \$2}' | sed 's#refs/heads/##'
+                        """,
                         returnStdout: true
                     ).trim()
 
                     def selected = branch.split("\n")[0]
-                    echo "✔ Selected branch: ${selected}"
-
                     env.REPO_BRANCH = selected
+
+                    echo "✔ Selected branch: ${selected}"
                 }
             }
         }
@@ -42,7 +49,7 @@ pipeline {
             steps {
                 sh """
                     rm -rf ${APP_DIR}
-                    git clone --depth 1 -b ${env.REPO_BRANCH} https://github.com/RAHEEL-JAMAL/dockerizing-reactjs-app.git ${APP_DIR}
+                    git clone --depth 1 -b ${REPO_BRANCH} https://github.com/RAHEEL-JAMAL/dockerizing-reactjs-app.git ${APP_DIR}
                 """
             }
         }
@@ -50,12 +57,8 @@ pipeline {
         stage('Detect Stack') {
             steps {
                 script {
-                    def isNode = fileExists("${APP_DIR}/package.json")
-
-                    if (isNode) {
+                    if (fileExists("${APP_DIR}/package.json")) {
                         echo "📦 Stack: node"
-                    } else {
-                        echo "📦 Stack: unknown (default node)"
                     }
                 }
             }
@@ -92,41 +95,40 @@ CMD ["npm","start"]
                     cd ${APP_DIR}
                     docker build -t ${IMAGE_NAME} .
                 """
-
                 echo "🐳 Built: ${IMAGE_NAME}"
             }
         }
 
-      stage('Push Image') {
-    steps {
-        withCredentials([usernamePassword(
-            credentialsId: 'dockerhub-creds',
-            usernameVariable: 'DOCKER_USER',
-            passwordVariable: 'DOCKER_PASS'
-        )]) {
+        stage('Push Image') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-cred',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
 
-            sh '''
-                set +x
-                echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
-                docker push raheeljamal/app-${BUILD_NUMBER}:v1
-            '''
+                    sh '''
+                        set +x
+                        echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                        docker push ${IMAGE_NAME}
+                    '''
+                }
+            }
         }
-    }
-}
+
         stage('Deploy Container') {
             steps {
                 script {
 
-                    // detect port from image type
-                    def dockerfileText = readFile("${APP_DIR}/Dockerfile").toLowerCase()
-
                     def containerPort = "3000"
 
-                    if (dockerfileText.contains("nginx")) {
+                    def df = readFile("${APP_DIR}/Dockerfile").toLowerCase()
+
+                    if (df.contains("nginx")) {
                         containerPort = "80"
-                    } else if (dockerfileText.contains("expose 8000")) {
+                    } else if (df.contains("expose 8000")) {
                         containerPort = "8000"
-                    } else if (dockerfileText.contains("expose 5000")) {
+                    } else if (df.contains("expose 5000")) {
                         containerPort = "5000"
                     }
 
@@ -144,7 +146,10 @@ CMD ["npm","start"]
                         echo \$PORT > /tmp/${APP_NAME}_port.txt
                     """
 
-                    APP_PORT = sh(script: "cat /tmp/${APP_NAME}_port.txt", returnStdout: true).trim()
+                    env.APP_PORT = sh(
+                        script: "cat /tmp/${APP_NAME}_port.txt",
+                        returnStdout: true
+                    ).trim()
                 }
             }
         }
