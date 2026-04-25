@@ -5,7 +5,6 @@ pipeline {
         IMAGE_NAME = "auto-app"
         IMAGE_TAG = "latest"
         CONTAINER_NAME = "auto_container"
-        PORT = "8000"
     }
 
     stages {
@@ -19,7 +18,6 @@ pipeline {
         stage('Input Repo') {
             steps {
                 script {
-                    // You can also replace this with Jenkins parameter
                     env.REPO_URL = params.REPO_URL ?: "https://github.com/RAHEEL-JAMAL/LondheShubham153-django-notes-app.git"
                     echo "📦 Repo: ${env.REPO_URL}"
                 }
@@ -40,13 +38,23 @@ pipeline {
                 script {
                     if (fileExists('app/manage.py')) {
                         env.STACK = "django"
-                    } else if (fileExists('app/package.json')) {
+                        env.INTERNAL_PORT = "8000"
+                    } 
+                    else if (fileExists('app/package.json')) {
                         env.STACK = "node"
-                    } else {
+                        env.INTERNAL_PORT = "80"
+                    } 
+                    else if (fileExists('app/index.php')) {
+                        env.STACK = "php"
+                        env.INTERNAL_PORT = "80"
+                    }
+                    else {
                         env.STACK = "unknown"
+                        env.INTERNAL_PORT = "80"
                     }
 
-                    echo "📦 Detected Stack: ${env.STACK}"
+                    echo "📦 Stack: ${env.STACK}"
+                    echo "🔌 Internal Port: ${env.INTERNAL_PORT}"
                 }
             }
         }
@@ -58,7 +66,7 @@ pipeline {
                         sh '''
                             cd app
                             npm install
-                            npm run build || echo "No build step"
+                            npm run build || echo "No build step required"
                         '''
                     } else {
                         echo "ℹ️ No build step required"
@@ -70,37 +78,49 @@ pipeline {
         stage('Create Dockerfile if missing') {
             steps {
                 script {
+
                     if (!fileExists('app/Dockerfile')) {
 
                         echo "🛠 Creating AUTO Dockerfile"
 
                         if (env.STACK == "django") {
-                            writeFile file: 'app/Dockerfile', text: '''
+                            writeFile file: 'app/Dockerfile', text: """
 FROM python:3.11
 WORKDIR /app
 COPY . .
 RUN pip install -r requirements.txt
 EXPOSE 8000
 CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
-'''
+"""
                         }
 
                         else if (env.STACK == "node") {
-                            writeFile file: 'app/Dockerfile', text: '''
-FROM node:18
+                            writeFile file: 'app/Dockerfile', text: """
+FROM node:20-alpine AS build
 WORKDIR /app
 COPY . .
-RUN npm install
-EXPOSE 3000
-CMD ["npm", "start"]
-'''
+RUN npm install && npm run build
+
+FROM nginx:alpine
+COPY --from=build /app/dist /usr/share/nginx/html
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+"""
+                        }
+
+                        else if (env.STACK == "php") {
+                            writeFile file: 'app/Dockerfile', text: """
+FROM php:8.2-apache
+COPY . /var/www/html
+EXPOSE 80
+"""
                         }
 
                         else {
-                            writeFile file: 'app/Dockerfile', text: '''
+                            writeFile file: 'app/Dockerfile', text: """
 FROM alpine
 CMD echo "Unknown project"
-'''
+"""
                         }
                     } else {
                         echo "📝 Dockerfile already exists"
@@ -128,7 +148,7 @@ CMD echo "Unknown project"
             }
         }
 
-        stage('Run Container') {
+        stage('Run Container (FIXED PORT LOGIC)') {
             steps {
                 script {
 
@@ -141,19 +161,12 @@ CMD echo "Unknown project"
                         '''
                     }
 
-                    else if (env.STACK == "node") {
-                        sh '''
-                            docker run -d \
-                            --name auto_container \
-                            -p 3000:3000 \
-                            auto-app:latest
-                        '''
-                    }
-
                     else {
+                        // IMPORTANT FIX: React + PHP + Nginx all use port 80 inside container
                         sh '''
                             docker run -d \
                             --name auto_container \
+                            -p 3000:80 \
                             auto-app:latest
                         '''
                     }
@@ -175,7 +188,8 @@ CMD echo "Unknown project"
     post {
         success {
             echo "✅ AUTO DEPLOY SUCCESS"
-            echo "🌐 App should be running on VM IP with exposed port"
+            echo "🌐 Django → http://VM_IP:8000"
+            echo "🌐 Other Apps → http://VM_IP:3000"
         }
 
         failure {
