@@ -2,12 +2,12 @@ pipeline {
     agent any
 
     environment {
+        APP_NAME = "${APP_NAME}"
+        REPO_URL = "${REPO_URL}"
         IMAGE_NAME = "raheeljamal/${APP_NAME}"
         IMAGE_TAG = "latest"
         DOCKER_CREDS = "dockerhub-cred"
         PORT = ""
-        APP_NAME = "${APP_NAME}"
-        REPO_URL = "${REPO_URL}"
     }
 
     stages {
@@ -56,7 +56,7 @@ pipeline {
             }
         }
 
-        stage("Prepare Nginx Config (FIX MIME + SPA)") {
+        stage("Create Nginx Config (FIXED SPA)") {
             steps {
                 script {
                     writeFile file: "/tmp/${APP_NAME}/default.conf", text: """
@@ -73,7 +73,7 @@ server {
         try_files \$uri \$uri/ /index.html;
     }
 
-    location ~* \.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2)$ {
+    location ~* \\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2)$ {
         expires 1y;
         add_header Cache-Control "public, immutable";
     }
@@ -83,13 +83,12 @@ server {
             }
         }
 
-        stage("Build Image (FIXED)") {
+        stage("Build Image (FAST + SAFE)") {
             steps {
                 script {
                     sh """
                         cd /tmp/${APP_NAME}
-
-                        docker build -t ${IMAGE_NAME}:${IMAGE_TAG} .
+                        DOCKER_BUILDKIT=1 docker build -t ${IMAGE_NAME}:${IMAGE_TAG} .
                     """
 
                     echo "🐳 Built: ${IMAGE_NAME}:${IMAGE_TAG}"
@@ -112,7 +111,7 @@ server {
             }
         }
 
-        stage("Deploy Container") {
+        stage("Deploy Container (AUTO SAFE)") {
             steps {
                 script {
                     PORT = sh(script: "shuf -i 3000-3999 -n 1", returnStdout: true).trim()
@@ -127,24 +126,24 @@ server {
                         ${IMAGE_NAME}:${IMAGE_TAG}
                     """
 
-                    echo "🌐 Running: http://192.168.122.127:${PORT}"
+                    echo "🌐 LIVE URL: http://192.168.122.127:${PORT}"
                 }
             }
         }
 
         stage("Verify") {
             steps {
-                echo "🚀 LIVE URL READY"
+                echo "🚀 DEPLOYMENT COMPLETE"
             }
         }
     }
 
     post {
         success {
-            echo "🚀 DEPLOYMENT SUCCESS"
+            echo "✅ SUCCESS"
         }
         failure {
-            echo "❌ PIPELINE FAILED"
+            echo "❌ FAILED"
         }
     }
 }
