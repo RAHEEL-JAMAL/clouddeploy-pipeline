@@ -2,47 +2,39 @@ pipeline {
     agent any
 
     environment {
-        DOCKERHUB_USER = "raheeljamal"
-        IMAGE_NAME = "${DOCKERHUB_USER}/${APP_NAME}"
-        CONTAINER_NAME = "${APP_NAME}"
-    }
-
-    parameters {
-        string(name: 'APP_NAME', defaultValue: 'myapp', description: 'App name')
-        string(name: 'REPO_URL', defaultValue: '', description: 'Git repo URL')
-        string(name: 'BRANCH', defaultValue: 'auto', description: 'Branch name (auto optional)')
+        IMAGE_NAME = "raheeljamal/${APP_NAME}"
+        IMAGE_TAG = "latest"
+        DOCKER_CREDS = "dockerhub-cred"
+        PORT = ""
+        APP_NAME = "${APP_NAME}"
+        REPO_URL = "${REPO_URL}"
     }
 
     stages {
 
-        stage('Init') {
+        stage("Init") {
             steps {
                 script {
-                    echo "🚀 App: ${params.APP_NAME}"
-                    echo "📦 Repo: ${params.REPO_URL}"
+                    echo "🚀 App: ${APP_NAME}"
+                    echo "📦 Repo: ${REPO_URL}"
                 }
             }
         }
 
-        stage('Detect Branch') {
+        stage("Detect Branch") {
             steps {
                 script {
-                    def branch = "main"
-                    if (params.BRANCH == "auto") {
-                        branch = sh(
-                            script: "git ls-remote --heads ${params.REPO_URL} | awk '{print \$2}' | sed 's#refs/heads/##' | head -n 1",
-                            returnStdout: true
-                        ).trim()
-                    } else {
-                        branch = params.BRANCH
-                    }
-                    env.BRANCH = branch
-                    echo "✔ Using branch: ${branch}"
+                    env.BRANCH = sh(
+                        script: "git ls-remote --heads ${REPO_URL} | awk '{print \$2}' | sed 's#refs/heads/##' | head -n 1",
+                        returnStdout: true
+                    ).trim()
+
+                    echo "✔ Using branch: ${env.BRANCH}"
                 }
             }
         }
 
-        stage('Clone Repo') {
+        stage("Clone Repo") {
             steps {
                 sh """
                     rm -rf /tmp/${APP_NAME}
@@ -51,7 +43,7 @@ pipeline {
             }
         }
 
-        stage('Detect Stack') {
+        stage("Detect Stack") {
             steps {
                 script {
                     if (fileExists("/tmp/${APP_NAME}/package.json")) {
@@ -64,74 +56,85 @@ pipeline {
             }
         }
 
-        stage('Prepare Dockerfile') {
+        stage("Prepare Nginx Config (FIX MIME + SPA)") {
             steps {
                 script {
-                    def path = "/tmp/${APP_NAME}/Dockerfile"
+                    writeFile file: "/tmp/${APP_NAME}/default.conf", text: """
+server {
+    listen 80;
+    server_name localhost;
 
-                    if (!fileExists(path)) {
-                        echo "⚠ No Dockerfile → creating default"
+    root /usr/share/nginx/html;
+    index index.html;
 
-                        writeFile file: path, text: """
-                        FROM nginx:alpine
-                        COPY . /usr/share/nginx/html
-                        EXPOSE 80
-                        CMD ["nginx", "-g", "daemon off;"]
-                        """
-                    } else {
-                        echo "✔ Dockerfile exists"
-                    }
+    include /etc/nginx/mime.types;
+
+    location / {
+        try_files \$uri \$uri/ /index.html;
+    }
+
+    location ~* \.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+}
+"""
                 }
             }
         }
 
-        stage('Build Image') {
+        stage("Build Image (FIXED)") {
             steps {
-                sh """
-                    cd /tmp/${APP_NAME}
-                    DOCKER_BUILDKIT=0 docker build --no-cache -t ${IMAGE_NAME}:v1 .
-                """
-                echo "🐳 Built: ${IMAGE_NAME}:v1"
+                script {
+                    sh """
+                        cd /tmp/${APP_NAME}
+
+                        docker build -t ${IMAGE_NAME}:${IMAGE_TAG} .
+                    """
+
+                    echo "🐳 Built: ${IMAGE_NAME}:${IMAGE_TAG}"
+                }
             }
         }
 
-        stage('Push Image') {
+        stage("Push Image (FIXED LOGIN)") {
             steps {
                 withCredentials([usernamePassword(
-                    credentialsId: 'dockerhub-cred',
-                    usernameVariable: 'DOCKER_USER',
-                    passwordVariable: 'DOCKER_PASS'
+                    credentialsId: "${DOCKER_CREDS}",
+                    usernameVariable: "USER",
+                    passwordVariable: "PASS"
                 )]) {
-
-                    sh '''
-                        echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
-                        docker push ${IMAGE_NAME}:v1
-                    '''
+                    sh """
+                        echo $PASS | docker login -u $USER --password-stdin
+                        docker push ${IMAGE_NAME}:${IMAGE_TAG}
+                    """
                 }
             }
         }
 
-        stage('Deploy Container') {
+        stage("Deploy Container") {
             steps {
                 script {
-                    def port = sh(script: "shuf -i 3000-3999 -n 1", returnStdout: true).trim()
+                    PORT = sh(script: "shuf -i 3000-3999 -n 1", returnStdout: true).trim()
 
                     sh """
                         docker stop ${APP_NAME} || true
                         docker rm ${APP_NAME} || true
-                        docker run -d -p ${port}:80 --name ${APP_NAME} ${IMAGE_NAME}:v1
+
+                        docker run -d \
+                        -p ${PORT}:80 \
+                        --name ${APP_NAME} \
+                        ${IMAGE_NAME}:${IMAGE_TAG}
                     """
 
-                    env.PORT = port
-                    echo "🌐 Running on: http://192.168.122.127:${port}"
+                    echo "🌐 Running: http://192.168.122.127:${PORT}"
                 }
             }
         }
 
-        stage('Verify') {
+        stage("Verify") {
             steps {
-                echo "🚀 LIVE URL:"
-                echo "👉 http://192.168.122.127:${PORT}"
+                echo "🚀 LIVE URL READY"
             }
         }
     }
@@ -141,7 +144,7 @@ pipeline {
             echo "🚀 DEPLOYMENT SUCCESS"
         }
         failure {
-            echo "❌ DEPLOYMENT FAILED"
+            echo "❌ PIPELINE FAILED"
         }
     }
 }
