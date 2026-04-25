@@ -139,20 +139,20 @@ CMD ["nginx", "-g", "daemon off;"]
             }
         }
 
-        stage('Push Image') {
-            steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'dockerhub-cred',
-                    usernameVariable: 'USER',
-                    passwordVariable: 'PASS'
-                )]) {
-                    sh '''
-                        echo "$PASS" | docker login -u "$USER" --password-stdin
-                        docker push '"${IMAGE_NAME}"':v1
-                    '''
-                }
-            }
+       stage('Push Image') {
+    steps {
+        withCredentials([usernamePassword(
+            credentialsId: 'dockerhub-cred',
+            usernameVariable: 'USER',
+            passwordVariable: 'PASS'
+        )]) {
+            sh """
+                echo "\$PASS" | docker login -u "\$USER" --password-stdin
+                docker push ${IMAGE_NAME}:v1
+            """
         }
+    }
+}
 
         stage('Deploy') {
             steps {
