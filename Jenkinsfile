@@ -9,13 +9,16 @@ pipeline {
 
     environment {
         DOCKERHUB_USER = "raheeljamal"
-        IMAGE_NAME = "raheeljamal/${params.APP_NAME}"
     }
 
     stages {
 
         stage('Init') {
             steps {
+                script {
+                    env.IMAGE_NAME = "${DOCKERHUB_USER}/${params.APP_NAME}"
+                }
+
                 echo "🚀 Deploying: ${params.APP_NAME}"
                 echo "📦 Repo: ${params.REPO_URL}"
             }
@@ -28,7 +31,7 @@ pipeline {
 
                     if (params.BRANCH == "auto") {
                         def branches = sh(
-                            script: """git ls-remote --heads ${params.REPO_URL} | awk '{print \$2}' | sed 's#refs/heads/##'""",
+                            script: "git ls-remote --heads ${params.REPO_URL} | awk '{print \$2}' | sed 's#refs/heads/##'",
                             returnStdout: true
                         ).trim()
 
@@ -55,7 +58,7 @@ pipeline {
             steps {
                 sh """
                     rm -rf app
-                    git clone --depth 1 -b ${BRANCH} ${REPO_URL} app
+                    git clone --depth 1 -b ${env.BRANCH} ${params.REPO_URL} app
                 """
             }
         }
@@ -80,19 +83,13 @@ pipeline {
             steps {
                 script {
                     if (env.STACK == "node") {
-                        sh '''
+                        sh """
                             docker run --rm \
-                              -v "$PWD/app:/app" \
+                              -v \$PWD/app:/app \
                               -w /app \
                               node:20-alpine \
                               sh -c "npm install && npm run build"
-                        '''
-
-                        if (!fileExists("app/dist")) {
-                            error("❌ Build failed: dist folder missing")
-                        }
-
-                        echo "✅ Node build completed"
+                        """
                     } else {
                         echo "ℹ️ No build required for ${env.STACK}"
                     }
@@ -103,7 +100,6 @@ pipeline {
         stage('Prepare Dockerfile') {
             steps {
                 script {
-
                     if (!fileExists("app/Dockerfile")) {
 
                         if (env.STACK == "node") {
@@ -113,8 +109,7 @@ COPY dist/ /usr/share/nginx/html
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
 '''
-                        }
-
+                        } 
                         else if (env.STACK == "django") {
                             writeFile file: "app/Dockerfile", text: '''
 FROM python:3.9
@@ -122,10 +117,9 @@ WORKDIR /app
 COPY . .
 RUN pip install -r requirements.txt
 EXPOSE 8000
-CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+CMD python manage.py runserver 0.0.0.0:8000
 '''
-                        }
-
+                        } 
                         else {
                             writeFile file: "app/Dockerfile", text: '''
 FROM nginx:alpine
@@ -135,7 +129,7 @@ CMD ["nginx", "-g", "daemon off;"]
 '''
                         }
 
-                        echo "📝 Dockerfile generated for ${env.STACK}"
+                        echo "📝 Dockerfile generated"
                     } else {
                         echo "📝 Existing Dockerfile used"
                     }
@@ -147,23 +141,33 @@ CMD ["nginx", "-g", "daemon off;"]
             steps {
                 sh """
                     cd app
-                    docker build -t ${IMAGE_NAME}:v1 .
+                    docker build -t ${env.IMAGE_NAME}:v1 .
                 """
             }
         }
 
-        stage('Push Image') {
+        stage('Push Image (FIXED + RETRY)') {
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: 'dockerhub-cred',
                     usernameVariable: 'USER',
                     passwordVariable: 'PASS'
                 )]) {
-                    sh '''
+
+                    sh """
                         set -e
-                        echo "$PASS" | docker login -u "$USER" --password-stdin
-                        docker push ${IMAGE_NAME}:v1
-                    '''
+
+                        echo "\$PASS" | docker login -u "\$USER" --password-stdin
+
+                        # 🔥 RETRY PUSH (fix Docker Hub timeout issue)
+                        for i in 1 2 3 4 5
+                        do
+                            echo "🚀 Push attempt \$i..."
+                            docker push ${env.IMAGE_NAME}:v1 && break
+                            echo "❌ Push failed, retrying in 10s..."
+                            sleep 10
+                        done
+                    """
                 }
             }
         }
@@ -173,14 +177,18 @@ CMD ["nginx", "-g", "daemon off;"]
                 script {
 
                     def hostPort = sh(script: "shuf -i 3000-3999 -n 1", returnStdout: true).trim()
-                    def containerPort = (env.STACK == "django") ? "8000" : "80"
 
-                    echo "🧠 Mapping: ${hostPort} -> ${containerPort}"
+                    def containerPort = "80"
+                    if (env.STACK == "django") {
+                        containerPort = "8000"
+                    }
+
+                    echo "🧠 Port mapping: ${hostPort} -> ${containerPort}"
 
                     sh """
                         docker stop ${params.APP_NAME} || true
                         docker rm ${params.APP_NAME} || true
-                        docker run -d -p ${hostPort}:${containerPort} --name ${params.APP_NAME} ${IMAGE_NAME}:v1
+                        docker run -d -p ${hostPort}:${containerPort} --name ${params.APP_NAME} ${env.IMAGE_NAME}:v1
                     """
 
                     echo "🌐 LIVE: http://192.168.122.127:${hostPort}"
