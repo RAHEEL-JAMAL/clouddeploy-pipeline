@@ -7,7 +7,6 @@ pipeline {
         IMAGE_NAME = "raheeljamal/${APP_NAME}"
         IMAGE_TAG = "latest"
         DOCKER_CREDS = "dockerhub-cred"
-        PORT = ""
     }
 
     stages {
@@ -29,7 +28,7 @@ pipeline {
                         returnStdout: true
                     ).trim()
 
-                    echo "✔ Using branch: ${env.BRANCH}"
+                    echo "✔ Branch: ${env.BRANCH}"
                 }
             }
         }
@@ -73,7 +72,7 @@ server {
         try_files \$uri \$uri/ /index.html;
     }
 
-    location ~* \\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2)$ {
+    location ~* \\.(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2)\\$ {
         expires 1y;
         add_header Cache-Control "public, immutable";
     }
@@ -83,15 +82,14 @@ server {
             }
         }
 
-        stage("Build Image (FAST + SAFE)") {
+        stage("Build Image") {
             steps {
                 script {
                     sh """
                         cd /tmp/${APP_NAME}
                         DOCKER_BUILDKIT=1 docker build -t ${IMAGE_NAME}:${IMAGE_TAG} .
                     """
-
-                    echo "🐳 Built: ${IMAGE_NAME}:${IMAGE_TAG}"
+                    echo "🐳 Image built"
                 }
             }
         }
@@ -111,10 +109,10 @@ server {
             }
         }
 
-        stage("Deploy Container (AUTO SAFE)") {
+        stage("Deploy Container") {
             steps {
                 script {
-                    PORT = sh(script: "shuf -i 3000-3999 -n 1", returnStdout: true).trim()
+                    def PORT = sh(script: "shuf -i 3000-3999 -n 1", returnStdout: true).trim()
 
                     sh """
                         docker stop ${APP_NAME} || true
@@ -126,14 +124,14 @@ server {
                         ${IMAGE_NAME}:${IMAGE_TAG}
                     """
 
-                    echo "🌐 LIVE URL: http://192.168.122.127:${PORT}"
+                    echo "🌐 LIVE: http://192.168.122.127:${PORT}"
                 }
             }
         }
 
         stage("Verify") {
             steps {
-                echo "🚀 DEPLOYMENT COMPLETE"
+                echo "🚀 DEPLOYMENT SUCCESS"
             }
         }
     }
