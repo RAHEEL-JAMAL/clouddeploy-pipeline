@@ -159,6 +159,44 @@ CMD sh -c "PORT=3000 node server.js || PORT=3000 node index.js || PORT=3000 npm 
             }
         }
 
+        // ─── NEW STAGE ────────────────────────────────────────────────────────
+        stage('Push to DockerHub') {
+            steps {
+                script {
+                    echo "[STAGE_START] Push to DockerHub"
+                }
+
+                script {
+                    withCredentials([usernamePassword(
+                        credentialsId: 'dockerhub-cred',
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASS'
+                    )]) {
+                        sh '''
+                            echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+
+                            # Tag image as dockerhub_user/auto-app:APP_ID
+                            docker tag auto-app:${APP_ID} ${DOCKER_USER}/auto-app:${APP_ID}
+
+                            # Also tag as latest for convenience
+                            docker tag auto-app:${APP_ID} ${DOCKER_USER}/auto-app:latest
+
+                            # Push both tags
+                            docker push ${DOCKER_USER}/auto-app:${APP_ID}
+                            docker push ${DOCKER_USER}/auto-app:latest
+
+                            echo "[META] DOCKER_IMAGE=${DOCKER_USER}/auto-app:${APP_ID}"
+                        '''
+                    }
+                }
+
+                script {
+                    echo "[STAGE_SUCCESS] Push to DockerHub"
+                }
+            }
+        }
+        // ─────────────────────────────────────────────────────────────────────
+
         stage('Stop Old Container') {
             steps {
                 script { echo "[STAGE_START] Stop Old Container" }
