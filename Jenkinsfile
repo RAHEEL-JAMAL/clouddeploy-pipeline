@@ -82,32 +82,44 @@ pipeline {
                     echo "[STAGE_START] Secret Scan (Gitleaks)"
                     echo "🔍 Scanning repo for hardcoded secrets..."
 
-                    // Install gitleaks if not present
-                    sh '''
-                        if ! command -v gitleaks &> /dev/null; then
-                            echo "Installing gitleaks..."
-                            curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz \
-                                | tar -xz -C /usr/local/bin gitleaks || true
-                        fi
-                    '''
-
-                    def leakResult = sh(
+                    def scanResult = sh(
                         script: '''
-                            gitleaks detect \
-                                --source=./app \
-                                --no-git \
-                                --report-format=json \
-                                --report-path=gitleaks-report.json \
-                                --exit-code=1 2>&1 || echo "LEAKS_FOUND"
+                            FOUND=0
+
+                            # Patterns to detect common secrets
+                            PATTERNS=(
+                                "password\\s*=\\s*['\"][^'\"]{4,}"
+                                "secret\\s*=\\s*['\"][^'\"]{4,}"
+                                "api_key\\s*=\\s*['\"][^'\"]{4,}"
+                                "apikey\\s*=\\s*['\"][^'\"]{4,}"
+                                "access_token\\s*=\\s*['\"][^'\"]{4,}"
+                                "private_key"
+                                "BEGIN RSA PRIVATE"
+                                "BEGIN OPENSSH PRIVATE"
+                                "AWS_SECRET_ACCESS_KEY"
+                                "AKIA[0-9A-Z]{16}"
+                            )
+
+                            for pattern in "${PATTERNS[@]}"; do
+                                MATCHES=$(grep -rn --include="*.js" --include="*.py" --include="*.env" --include="*.json" --include="*.yml" --include="*.yaml" -iE "$pattern" ./app 2>/dev/null | grep -v ".git" | grep -v "node_modules" | grep -v "package-lock" || true)
+                                if [ -n "$MATCHES" ]; then
+                                    echo "POTENTIAL SECRET FOUND: $MATCHES"
+                                    FOUND=1
+                                fi
+                            done
+
+                            if [ "$FOUND" -eq 1 ]; then
+                                echo "SCAN_RESULT=FAILED"
+                            else
+                                echo "SCAN_RESULT=PASSED"
+                            fi
                         ''',
                         returnStdout: true
                     ).trim()
 
-                    if (leakResult.contains('LEAKS_FOUND')) {
+                    if (scanResult.contains('SCAN_RESULT=FAILED')) {
                         echo "[META] SECRET_SCAN=FAILED"
-                        echo "⚠️  Hardcoded secrets detected! Check gitleaks-report.json"
-                        // Warn but don't fail — change 'echo' to 'error()' to hard-fail
-                        echo "WARNING: Secrets found in repo. Review before production use."
+                        echo "⚠️  Potential hardcoded secrets detected! Review your code."
                     } else {
                         echo "[META] SECRET_SCAN=PASSED"
                         echo "✅ No secrets found in repository"
@@ -252,72 +264,55 @@ CMD sh -c "PORT=3000 node server.js || PORT=3000 node index.js || PORT=3000 npm 
                     echo "[STAGE_START] Image Scan (Trivy)"
                     echo "🔍 Scanning Docker image for CVEs..."
 
-                    // Install trivy if not present
-                    sh '''
-                        if ! command -v trivy &> /dev/null; then
-                            echo "Installing Trivy..."
-                            curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-                                | sh -s -- -b /usr/local/bin v0.52.0 || true
-                        fi
-                    '''
-
-                    def trivyResult = sh(
+                    def trivyOutput = sh(
                         script: '''
-                            trivy image \
+                            # Run trivy via Docker — no install needed
+                            docker run --rm \
+                                -v /var/run/docker.sock:/var/run/docker.sock \
+                                aquasec/trivy:latest image \
                                 --exit-code 0 \
                                 --severity HIGH,CRITICAL \
+                                --format table \
+                                --no-progress \
+                                auto-app:${APP_ID} 2>&1 || true
+
+                            # Count CRITICAL lines
+                            CRITICAL=$(docker run --rm \
+                                -v /var/run/docker.sock:/var/run/docker.sock \
+                                aquasec/trivy:latest image \
+                                --exit-code 0 \
+                                --severity CRITICAL \
                                 --format json \
-                                --output trivy-report.json \
-                                auto-app:${APP_ID} 2>&1
-
-                            # Count vulnerabilities
-                            CRITICAL=$(python3 -c "
-import json, sys
+                                --no-progress \
+                                --quiet \
+                                auto-app:${APP_ID} 2>/dev/null \
+                                | python3 -c "
+import sys, json
 try:
-    d = json.load(open('trivy-report.json'))
-    total = sum(
-        len([v for v in r.get('Vulnerabilities', []) if v.get('Severity') == 'CRITICAL'])
-        for result in d.get('Results', [])
-        for r in [result]
-    )
+    d = json.load(sys.stdin)
+    total = sum(len([v for v in (r.get('Vulnerabilities') or []) if v.get('Severity') == 'CRITICAL']) for r in (d.get('Results') or []))
     print(total)
 except:
     print(0)
 " 2>/dev/null || echo "0")
 
-                            HIGH=$(python3 -c "
-import json, sys
-try:
-    d = json.load(open('trivy-report.json'))
-    total = sum(
-        len([v for v in r.get('Vulnerabilities', []) if v.get('Severity') == 'HIGH'])
-        for result in d.get('Results', [])
-        for r in [result]
-    )
-    print(total)
-except:
-    print(0)
-" 2>/dev/null || echo "0")
-
-                            echo "CRITICAL_CVE=$CRITICAL"
-                            echo "HIGH_CVE=$HIGH"
+                            echo "CRITICAL_CVE_COUNT=$CRITICAL"
                         ''',
                         returnStdout: true
                     ).trim()
 
-                    def criticalCount = sh(
-                        script: "echo '${trivyResult}' | grep 'CRITICAL_CVE=' | cut -d'=' -f2 || echo '0'",
-                        returnStdout: true
-                    ).trim()
+                    def criticalCount = "0"
+                    trivyOutput.split('\n').each { line ->
+                        if (line.startsWith('CRITICAL_CVE_COUNT=')) {
+                            criticalCount = line.split('=')[1].trim()
+                        }
+                    }
 
                     echo "[META] IMAGE_CRITICAL_CVE=${criticalCount}"
                     echo "[META] IMAGE_SCAN=PASSED"
 
                     if (criticalCount.toInteger() > 0) {
                         echo "⚠️  ${criticalCount} CRITICAL CVEs found in image!"
-                        echo "WARNING: Review trivy-report.json before deploying to production"
-                        // To hard-fail on critical CVEs, uncomment below:
-                        // error("Pipeline stopped: ${criticalCount} critical vulnerabilities found")
                     } else {
                         echo "✅ No critical CVEs found in Docker image"
                     }
@@ -433,3 +428,4 @@ except:
         }
     }
 }
+
