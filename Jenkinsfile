@@ -8,7 +8,6 @@ pipeline {
 
     stages {
 
-        // ── 1 ───────────────────────────────────────
         stage('Init') {
             steps {
                 script {
@@ -19,7 +18,6 @@ pipeline {
             }
         }
 
-        // ── 2 ───────────────────────────────────────
         stage('Input Repo') {
             steps {
                 script {
@@ -46,7 +44,6 @@ pipeline {
             }
         }
 
-        // ── 3 ───────────────────────────────────────
         stage('Allocate Safe Port') {
             steps {
                 script {
@@ -68,7 +65,6 @@ pipeline {
             }
         }
 
-        // ── 4 ───────────────────────────────────────
         stage('Clone Repo') {
             steps {
                 script { echo '[STAGE_START] Clone Repo' }
@@ -84,7 +80,6 @@ pipeline {
             }
         }
 
-        // ── 5 ───────────────────────────────────────
         stage('Secret Scan') {
             steps {
                 script {
@@ -93,21 +88,22 @@ pipeline {
                 }
                 sh '''#!/bin/bash
                     FOUND=0
-                    while IFS= read -r -d "" f; do
+
+                    find app -type f \\( -name "*.js" -o -name "*.py" -o -name "*.env" \\) \
+                        -not -path "*/node_modules/*" \
+                        -not -path "*/.git/*" \
+                        -not -name "package-lock.json" | while read -r f; do
                         if grep -qiE "(password|api_key|secret|access_token)\\s*=" "$f"; then
                             echo "[WARN] Possible secret in: $f"
                             FOUND=1
                         fi
-                    done < <(find app -type f \( -name "*.js" -o -name "*.py" -o -name "*.env" \) \
-                        -not -path "*/node_modules/*" \
-                        -not -path "*/.git/*" \
-                        -not -name "package-lock.json" \
-                        -print0)
+                    done
 
                     if [ "$FOUND" = "1" ]; then
                         echo "[META] SECRET_SCAN=FAILED"
                         exit 1
                     fi
+
                     echo "No secrets found."
                     echo "[META] SECRET_SCAN=PASSED"
                 '''
@@ -115,7 +111,6 @@ pipeline {
             }
         }
 
-        // ── 6 ───────────────────────────────────────
         stage('Detect Stack') {
             steps {
                 script {
@@ -135,10 +130,10 @@ pipeline {
                         if (mp)  { stack = 'django'; pkgRoot = mp.replaceAll('/manage\\.py', '') }
 
                         def cp = sh(script: "find app -maxdepth 2 -name composer.json | head -1", returnStdout: true).trim()
-                        if (cp)  { stack = 'php';    pkgRoot = cp.replaceAll('/composer\\.json', '') }
+                        if (cp)  { stack = 'php'; pkgRoot = cp.replaceAll('/composer\\.json', '') }
 
                         def jp = sh(script: "find app -maxdepth 2 \\( -name pom.xml -o -name build.gradle \\) | head -1", returnStdout: true).trim()
-                        if (jp)  { stack = 'java';   pkgRoot = jp.replaceAll('/(pom\\.xml|build\\.gradle)', '') }
+                        if (jp)  { stack = 'java'; pkgRoot = jp.replaceAll('/(pom\\.xml|build\\.gradle)', '') }
                     }
 
                     env.STACK    = stack
@@ -151,7 +146,6 @@ pipeline {
             }
         }
 
-        // ── 7 ───────────────────────────────────────
         stage('Dependency Audit') {
             steps {
                 script {
@@ -183,7 +177,6 @@ pipeline {
             }
         }
 
-        // ── 8 ───────────────────────────────────────
         stage('Create Dockerfile') {
             steps {
                 script {
@@ -218,7 +211,6 @@ pipeline {
             }
         }
 
-        // ── 9 ───────────────────────────────────────
         stage('Build Image') {
             steps {
                 script { echo '[STAGE_START] Build Image' }
@@ -227,7 +219,6 @@ pipeline {
             }
         }
 
-        // ── 10 ──────────────────────────────────────
         stage('Image Scan (Trivy)') {
             steps {
                 script { echo '[STAGE_START] Image Scan (Trivy)' }
@@ -246,7 +237,6 @@ pipeline {
             }
         }
 
-        // ── 11 ──────────────────────────────────────
         stage('Push to DockerHub') {
             steps {
                 script { echo '[STAGE_START] Push to DockerHub' }
@@ -259,7 +249,6 @@ pipeline {
             }
         }
 
-        // ── 12 ──────────────────────────────────────
         stage('Stop Old Container') {
             steps {
                 script { echo '[STAGE_START] Stop Old Container' }
@@ -271,7 +260,6 @@ pipeline {
             }
         }
 
-        // ── 13 ──────────────────────────────────────
         stage('Run Container') {
             steps {
                 script { echo '[STAGE_START] Run Container' }
@@ -280,7 +268,6 @@ pipeline {
             }
         }
 
-        // ── 14 ──────────────────────────────────────
         stage('Verify') {
             steps {
                 script { echo '[STAGE_START] Verify' }
@@ -301,10 +288,8 @@ pipeline {
                 script { echo '[STAGE_SUCCESS] Verify' }
             }
         }
+    }
 
-    } // end stages
-
-    // ── post: echo only — NO sh steps (avoids MissingContextVariableException) ──
     post {
         success {
             echo '[DEPLOY_SUCCESS]'
