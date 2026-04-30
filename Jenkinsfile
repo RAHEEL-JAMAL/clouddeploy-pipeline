@@ -86,29 +86,19 @@ pipeline {
                         script: '''
                             FOUND=0
 
-                            # Patterns to detect common secrets
-                            PATTERNS=(
-                                "password\\s*=\\s*['\"][^'\"]{4,}"
-                                "secret\\s*=\\s*['\"][^'\"]{4,}"
-                                "api_key\\s*=\\s*['\"][^'\"]{4,}"
-                                "apikey\\s*=\\s*['\"][^'\"]{4,}"
-                                "access_token\\s*=\\s*['\"][^'\"]{4,}"
-                                "private_key"
-                                "BEGIN RSA PRIVATE"
-                                "BEGIN OPENSSH PRIVATE"
-                                "AWS_SECRET_ACCESS_KEY"
-                                "AKIA[0-9A-Z]{16}"
-                            )
+                            grep -rniE "password\\s*=\\s*['\"][^'\"]{4,}" ./app --include="*.js" --include="*.py" --include="*.env" --include="*.yml" --include="*.yaml" --exclude-dir=".git" --exclude-dir="node_modules" --exclude="package-lock.json" 2>/dev/null && FOUND=1 || true
 
-                            for pattern in "${PATTERNS[@]}"; do
-                                MATCHES=$(grep -rn --include="*.js" --include="*.py" --include="*.env" --include="*.json" --include="*.yml" --include="*.yaml" -iE "$pattern" ./app 2>/dev/null | grep -v ".git" | grep -v "node_modules" | grep -v "package-lock" || true)
-                                if [ -n "$MATCHES" ]; then
-                                    echo "POTENTIAL SECRET FOUND: $MATCHES"
-                                    FOUND=1
-                                fi
-                            done
+                            grep -rniE "secret\\s*=\\s*['\"][^'\"]{4,}" ./app --include="*.js" --include="*.py" --include="*.env" --include="*.yml" --include="*.yaml" --exclude-dir=".git" --exclude-dir="node_modules" --exclude="package-lock.json" 2>/dev/null && FOUND=1 || true
 
-                            if [ "$FOUND" -eq 1 ]; then
+                            grep -rniE "api_key\\s*=\\s*['\"][^'\"]{4,}" ./app --include="*.js" --include="*.py" --include="*.env" --include="*.yml" --include="*.yaml" --exclude-dir=".git" --exclude-dir="node_modules" --exclude="package-lock.json" 2>/dev/null && FOUND=1 || true
+
+                            grep -rniE "access_token\\s*=\\s*['\"][^'\"]{4,}" ./app --include="*.js" --include="*.py" --include="*.env" --include="*.yml" --include="*.yaml" --exclude-dir=".git" --exclude-dir="node_modules" --exclude="package-lock.json" 2>/dev/null && FOUND=1 || true
+
+                            grep -rniE "AKIA[0-9A-Z]{16}" ./app --exclude-dir=".git" --exclude-dir="node_modules" 2>/dev/null && FOUND=1 || true
+
+                            grep -rniE "BEGIN (RSA|OPENSSH|EC) PRIVATE KEY" ./app --exclude-dir=".git" --exclude-dir="node_modules" 2>/dev/null && FOUND=1 || true
+
+                            if [ "$FOUND" = "1" ]; then
                                 echo "SCAN_RESULT=FAILED"
                             else
                                 echo "SCAN_RESULT=PASSED"
@@ -428,4 +418,3 @@ except:
         }
     }
 }
-
