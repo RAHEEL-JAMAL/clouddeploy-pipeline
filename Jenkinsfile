@@ -127,8 +127,17 @@ pipeline {
                         echo "[META] VULN_HIGH=0"
                         echo "[META] VULN_CRITICAL=0"
                     } else {
-                        sh 'if [ -f app/package.json ]; then cd app && npm audit --json > /tmp/npm-audit.json 2>&1; fi || true'
-                        sh 'python3 -c "import json; obj=json.load(open(\'/tmp/npm-audit.json\')); v=obj.get(\'metadata\',{}).get(\'vulnerabilities\',{}); print(\'[META] VULN_HIGH=\'+str(v.get(\'high\',0))); print(\'[META] VULN_CRITICAL=\'+str(v.get(\'critical\',0)))" 2>/dev/null || echo "[META] VULN_HIGH=0" && echo "[META] VULN_CRITICAL=0"'
+                        // Run npm audit inside a node container — no npm needed on Jenkins host
+                        sh '''
+                            if [ -f app/package.json ]; then
+                                docker run --rm \
+                                    -v "$(pwd)/app":/work \
+                                    -w /work \
+                                    node:20-alpine \
+                                    sh -c "npm audit --json > /work/npm-audit.json 2>&1 || true"
+                            fi
+                        '''
+                        sh 'python3 -c "import json; obj=json.load(open(\'app/npm-audit.json\')); v=obj.get(\'metadata\',{}).get(\'vulnerabilities\',{}); print(\'[META] VULN_HIGH=\'+str(v.get(\'high\',0))); print(\'[META] VULN_CRITICAL=\'+str(v.get(\'critical\',0)))" 2>/dev/null || echo "[META] VULN_HIGH=0" && echo "[META] VULN_CRITICAL=0"'
                     }
                     echo "[META] DEPENDENCY_SCAN=PASSED"
                     echo "[STAGE_SUCCESS] Dependency Audit"
@@ -142,29 +151,33 @@ pipeline {
                     echo "[STAGE_START] Create Dockerfile"
 
                     if (env.STACK == "vite") {
-                        // ── BUILD ON HOST (Jenkins), not inside Docker ──────────
-                        // This avoids npm network issues inside Docker build
+                        // Build inside a node:20-alpine container — no npm needed on Jenkins
                         sh '''
-                            cd app
-                            npm install --prefer-offline --no-audit 2>&1 || npm install 2>&1
-                            npm run build 2>&1
+                            docker run --rm \
+                                -v "$(pwd)/app":/work \
+                                -w /work \
+                                node:20-alpine \
+                                sh -c "npm install && npm run build"
                         '''
-                        // Minimal Dockerfile — just copy pre-built dist into nginx
+                        // Tiny Dockerfile — dist already built, just serve with nginx
                         writeFile file: 'app/Dockerfile', text: 'FROM nginx:alpine\nCOPY dist /usr/share/nginx/html\nEXPOSE 80\nCMD ["nginx", "-g", "daemon off;"]\n'
+
+                    } else if (env.STACK == "node") {
+                        // Install deps inside container, copy result
+                        sh '''
+                            docker run --rm \
+                                -v "$(pwd)/app":/work \
+                                -w /work \
+                                node:20-alpine \
+                                sh -c "npm install"
+                        '''
+                        if (!fileExists('app/Dockerfile')) {
+                            writeFile file: 'app/Dockerfile', text: 'FROM node:20-alpine\nWORKDIR /app\nCOPY . .\nEXPOSE 3000\nCMD sh -c "PORT=3000 node server.js || PORT=3000 node index.js || PORT=3000 npm start"\n'
+                        }
 
                     } else if (env.STACK == "django") {
                         if (!fileExists('app/Dockerfile')) {
                             writeFile file: 'app/Dockerfile', text: 'FROM python:3.11\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt || true\nEXPOSE 8000\nCMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]\n'
-                        }
-
-                    } else {
-                        // Node — build on host too, then copy
-                        sh '''
-                            cd app
-                            npm install --prefer-offline --no-audit 2>&1 || npm install 2>&1
-                        '''
-                        if (!fileExists('app/Dockerfile')) {
-                            writeFile file: 'app/Dockerfile', text: 'FROM node:20-alpine\nWORKDIR /app\nCOPY . .\nEXPOSE 3000\nCMD sh -c "PORT=3000 node server.js || PORT=3000 node index.js || PORT=3000 npm start"\n'
                         }
                     }
 
@@ -176,7 +189,8 @@ pipeline {
         stage('Build Image') {
             steps {
                 script { echo "[STAGE_START] Build Image" }
-                sh 'cd app && docker build -t auto-app:${APP_ID} .'
+                // --network=host gives Docker build access to VM network (faster pulls)
+                sh 'cd app && docker build --network=host -t auto-app:${APP_ID} .'
                 script { echo "[STAGE_SUCCESS] Build Image" }
             }
         }
@@ -211,13 +225,13 @@ pipeline {
                 script { echo "[STAGE_START] Push to DockerHub" }
                 withCredentials([usernamePassword(credentialsId: 'dockerhub-cred', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
                     sh 'echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin'
-                    // Tag with APP_ID only — skip :latest to avoid re-uploading all layers
+                    // Push APP_ID tag first — this uploads all layers
                     sh 'docker tag auto-app:${APP_ID} ${DOCKER_USER}/auto-app:${APP_ID}'
                     sh 'docker push ${DOCKER_USER}/auto-app:${APP_ID}'
-                    sh 'echo "[META] DOCKER_IMAGE=${DOCKER_USER}/auto-app:${APP_ID}"'
-                    // Update latest tag by reusing already-pushed layers (fast — metadata only)
-                    sh 'docker tag auto-app:${APP_ID} ${DOCKER_USER}/auto-app:latest'
+                    // latest reuses already-uploaded layers — only metadata sent (fast)
+                    sh 'docker tag ${DOCKER_USER}/auto-app:${APP_ID} ${DOCKER_USER}/auto-app:latest'
                     sh 'docker push ${DOCKER_USER}/auto-app:latest'
+                    sh 'echo "[META] DOCKER_IMAGE=${DOCKER_USER}/auto-app:${APP_ID}"'
                 }
                 script { echo "[STAGE_SUCCESS] Push to DockerHub" }
             }
