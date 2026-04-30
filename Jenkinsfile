@@ -1,3 +1,4 @@
+
 pipeline {
     agent any
 
@@ -11,7 +12,7 @@ pipeline {
             steps {
                 script {
                     echo "[STAGE_START] Init"
-                    echo "🚀 MULTI APP SAFE DEPLOY STARTED"
+                    echo "MULTI APP SAFE DEPLOY STARTED"
                     echo "[STAGE_SUCCESS] Init"
                 }
             }
@@ -63,63 +64,60 @@ pipeline {
                 script {
                     echo "[STAGE_START] Clone Repo"
                 }
-
                 sh '''
                     rm -rf app
                     git clone --depth 1 ${REPO_URL} app
                 '''
-
                 script {
                     echo "[STAGE_SUCCESS] Clone Repo"
                 }
             }
         }
 
-        // ─── SECURITY: SECRET SCANNING ────────────────────────────────────────
-        stage('Secret Scan (Gitleaks)') {
+        stage('Secret Scan') {
             steps {
                 script {
                     echo "[STAGE_START] Secret Scan (Gitleaks)"
-                    echo "🔍 Scanning repo for hardcoded secrets..."
+                    echo "Scanning repo for hardcoded secrets..."
 
-                    def scanResult = sh(
-                        script: '''
-                            FOUND=0
+                    def appDir = new File("${env.WORKSPACE}/app")
+                    def secretPatterns = [
+                        'password=', 'secret=', 'api_key=', 'apikey=',
+                        'access_token=', 'private_key', 'BEGIN RSA PRIVATE',
+                        'BEGIN OPENSSH PRIVATE', 'AWS_SECRET_ACCESS_KEY', 'AKIA'
+                    ]
+                    def extensions = ['.js', '.py', '.env', '.yml', '.yaml', '.ts']
+                    def found = []
 
-                            grep -rniE "password\\s*=\\s*['\"][^'\"]{4,}" ./app --include="*.js" --include="*.py" --include="*.env" --include="*.yml" --include="*.yaml" --exclude-dir=".git" --exclude-dir="node_modules" --exclude="package-lock.json" 2>/dev/null && FOUND=1 || true
+                    appDir.eachFileRecurse { file ->
+                        if (file.isFile()) {
+                            def skip = file.path.contains('node_modules') ||
+                                       file.path.contains('.git') ||
+                                       file.name == 'package-lock.json' ||
+                                       file.name == 'yarn.lock'
+                            if (!skip && extensions.any { file.name.endsWith(it) }) {
+                                def content = file.text.toLowerCase()
+                                secretPatterns.each { pattern ->
+                                    if (content.contains(pattern.toLowerCase())) {
+                                        found << "${file.name}: possible '${pattern}' found"
+                                    }
+                                }
+                            }
+                        }
+                    }
 
-                            grep -rniE "secret\\s*=\\s*['\"][^'\"]{4,}" ./app --include="*.js" --include="*.py" --include="*.env" --include="*.yml" --include="*.yaml" --exclude-dir=".git" --exclude-dir="node_modules" --exclude="package-lock.json" 2>/dev/null && FOUND=1 || true
-
-                            grep -rniE "api_key\\s*=\\s*['\"][^'\"]{4,}" ./app --include="*.js" --include="*.py" --include="*.env" --include="*.yml" --include="*.yaml" --exclude-dir=".git" --exclude-dir="node_modules" --exclude="package-lock.json" 2>/dev/null && FOUND=1 || true
-
-                            grep -rniE "access_token\\s*=\\s*['\"][^'\"]{4,}" ./app --include="*.js" --include="*.py" --include="*.env" --include="*.yml" --include="*.yaml" --exclude-dir=".git" --exclude-dir="node_modules" --exclude="package-lock.json" 2>/dev/null && FOUND=1 || true
-
-                            grep -rniE "AKIA[0-9A-Z]{16}" ./app --exclude-dir=".git" --exclude-dir="node_modules" 2>/dev/null && FOUND=1 || true
-
-                            grep -rniE "BEGIN (RSA|OPENSSH|EC) PRIVATE KEY" ./app --exclude-dir=".git" --exclude-dir="node_modules" 2>/dev/null && FOUND=1 || true
-
-                            if [ "$FOUND" = "1" ]; then
-                                echo "SCAN_RESULT=FAILED"
-                            else
-                                echo "SCAN_RESULT=PASSED"
-                            fi
-                        ''',
-                        returnStdout: true
-                    ).trim()
-
-                    if (scanResult.contains('SCAN_RESULT=FAILED')) {
+                    if (found.size() > 0) {
+                        found.each { echo "WARNING: ${it}" }
                         echo "[META] SECRET_SCAN=FAILED"
-                        echo "⚠️  Potential hardcoded secrets detected! Review your code."
                     } else {
                         echo "[META] SECRET_SCAN=PASSED"
-                        echo "✅ No secrets found in repository"
+                        echo "No secrets found in repository"
                     }
 
                     echo "[STAGE_SUCCESS] Secret Scan (Gitleaks)"
                 }
             }
         }
-        // ──────────────────────────────────────────────────────────────────────
 
         stage('Detect Stack') {
             steps {
@@ -145,39 +143,28 @@ pipeline {
             }
         }
 
-        // ─── SECURITY: DEPENDENCY AUDIT ───────────────────────────────────────
         stage('Dependency Audit') {
             steps {
                 script {
                     echo "[STAGE_START] Dependency Audit"
-                    echo "🔍 Scanning dependencies for known vulnerabilities..."
+                    echo "Scanning dependencies for known vulnerabilities..."
 
                     if (env.STACK == "django") {
-                        sh '''
-                            pip install pip-audit --quiet || true
-                            cd app
-                            if [ -f requirements.txt ]; then
-                                pip-audit -r requirements.txt --format=json -o pip-audit-report.json 2>&1 || true
-                                VULNS=$(python3 -c "import json; d=json.load(open('pip-audit-report.json')); print(len(d.get('dependencies',[])))" 2>/dev/null || echo "0")
-                                echo "Python packages scanned: $VULNS"
-                            else
-                                echo "No requirements.txt found, skipping pip audit"
-                            fi
-                        '''
+                        sh 'pip install pip-audit --quiet || true'
+                        sh 'if [ -f app/requirements.txt ]; then pip-audit -r app/requirements.txt 2>&1 || true; fi'
                     } else {
-                        sh '''
-                            cd app
-                            if [ -f package.json ]; then
-                                npm audit --json > npm-audit-report.json 2>&1 || true
-                                HIGH=$(cat npm-audit-report.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('metadata',{}).get('vulnerabilities',{}).get('high',0))" 2>/dev/null || echo "0")
-                                CRITICAL=$(cat npm-audit-report.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('metadata',{}).get('vulnerabilities',{}).get('critical',0))" 2>/dev/null || echo "0")
-                                echo "High severity: $HIGH | Critical: $CRITICAL"
-                                echo "[META] VULN_HIGH=$HIGH"
-                                echo "[META] VULN_CRITICAL=$CRITICAL"
-                            else
-                                echo "No package.json found, skipping npm audit"
-                            fi
-                        '''
+                        sh 'if [ -f app/package.json ]; then cd app && npm audit --json > /tmp/npm-audit.json 2>&1 || true; fi'
+                        sh '''python3 -c "
+import json
+try:
+    obj = json.load(open('/tmp/npm-audit.json'))
+    v = obj.get('metadata', {}).get('vulnerabilities', {})
+    print('[META] VULN_HIGH=' + str(v.get('high', 0)))
+    print('[META] VULN_CRITICAL=' + str(v.get('critical', 0)))
+except:
+    print('[META] VULN_HIGH=0')
+    print('[META] VULN_CRITICAL=0')
+" 2>/dev/null || true'''
                     }
 
                     echo "[META] DEPENDENCY_SCAN=PASSED"
@@ -185,7 +172,6 @@ pipeline {
                 }
             }
         }
-        // ──────────────────────────────────────────────────────────────────────
 
         stage('Create Dockerfile') {
             steps {
@@ -193,10 +179,8 @@ pipeline {
                     echo "[STAGE_START] Create Dockerfile"
 
                     if (!fileExists('app/Dockerfile')) {
-
                         if (env.STACK == "django") {
-                            writeFile file: 'app/Dockerfile', text: """
-FROM python:3.11
+                            writeFile file: 'app/Dockerfile', text: """FROM python:3.11
 WORKDIR /app
 COPY . .
 RUN pip install -r requirements.txt || true
@@ -204,8 +188,7 @@ EXPOSE 8000
 CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
 """
                         } else if (env.STACK == "vite") {
-                            writeFile file: 'app/Dockerfile', text: """
-FROM node:20-alpine AS build
+                            writeFile file: 'app/Dockerfile', text: """FROM node:20-alpine AS build
 WORKDIR /app
 COPY . .
 RUN npm install || true
@@ -217,8 +200,7 @@ EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
 """
                         } else {
-                            writeFile file: 'app/Dockerfile', text: """
-FROM node:20-alpine
+                            writeFile file: 'app/Dockerfile', text: """FROM node:20-alpine
 WORKDIR /app
 COPY . .
 RUN npm install || true
@@ -237,88 +219,51 @@ CMD sh -c "PORT=3000 node server.js || PORT=3000 node index.js || PORT=3000 npm 
         stage('Build Image') {
             steps {
                 script { echo "[STAGE_START] Build Image" }
-
-                sh '''
-                    cd app
-                    docker build -t auto-app:${APP_ID} .
-                '''
-
+                sh 'cd app && docker build -t auto-app:${APP_ID} .'
                 script { echo "[STAGE_SUCCESS] Build Image" }
             }
         }
 
-        // ─── SECURITY: IMAGE VULNERABILITY SCAN ──────────────────────────────
         stage('Image Scan (Trivy)') {
             steps {
                 script {
                     echo "[STAGE_START] Image Scan (Trivy)"
-                    echo "🔍 Scanning Docker image for CVEs..."
+                    echo "Scanning Docker image for CVEs..."
 
-                    def trivyOutput = sh(
-                        script: '''
-                            # Run trivy via Docker — no install needed
-                            docker run --rm \
-                                -v /var/run/docker.sock:/var/run/docker.sock \
-                                aquasec/trivy:latest image \
-                                --exit-code 0 \
-                                --severity HIGH,CRITICAL \
-                                --format table \
-                                --no-progress \
-                                auto-app:${APP_ID} 2>&1 || true
+                    sh 'docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --exit-code 0 --severity HIGH,CRITICAL --no-progress auto-app:${APP_ID} 2>&1 || true'
 
-                            # Count CRITICAL lines
-                            CRITICAL=$(docker run --rm \
-                                -v /var/run/docker.sock:/var/run/docker.sock \
-                                aquasec/trivy:latest image \
-                                --exit-code 0 \
-                                --severity CRITICAL \
-                                --format json \
-                                --no-progress \
-                                --quiet \
-                                auto-app:${APP_ID} 2>/dev/null \
-                                | python3 -c "
-import sys, json
+                    sh 'docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --exit-code 0 --severity CRITICAL --format json --no-progress --quiet auto-app:${APP_ID} > /tmp/trivy.json 2>/dev/null || true'
+
+                    def criticalCount = sh(
+                        script: '''python3 -c "
+import json
 try:
-    d = json.load(sys.stdin)
-    total = sum(len([v for v in (r.get('Vulnerabilities') or []) if v.get('Severity') == 'CRITICAL']) for r in (d.get('Results') or []))
+    d = json.load(open('/tmp/trivy.json'))
+    total = sum(1 for r in (d.get('Results') or []) for v in (r.get('Vulnerabilities') or []) if v.get('Severity') == 'CRITICAL')
     print(total)
 except:
     print(0)
-" 2>/dev/null || echo "0")
-
-                            echo "CRITICAL_CVE_COUNT=$CRITICAL"
-                        ''',
+" 2>/dev/null || echo 0''',
                         returnStdout: true
                     ).trim()
-
-                    def criticalCount = "0"
-                    trivyOutput.split('\n').each { line ->
-                        if (line.startsWith('CRITICAL_CVE_COUNT=')) {
-                            criticalCount = line.split('=')[1].trim()
-                        }
-                    }
 
                     echo "[META] IMAGE_CRITICAL_CVE=${criticalCount}"
                     echo "[META] IMAGE_SCAN=PASSED"
 
                     if (criticalCount.toInteger() > 0) {
-                        echo "⚠️  ${criticalCount} CRITICAL CVEs found in image!"
+                        echo "WARNING: ${criticalCount} CRITICAL CVEs found in image!"
                     } else {
-                        echo "✅ No critical CVEs found in Docker image"
+                        echo "No critical CVEs found in Docker image"
                     }
 
                     echo "[STAGE_SUCCESS] Image Scan (Trivy)"
                 }
             }
         }
-        // ──────────────────────────────────────────────────────────────────────
 
         stage('Push to DockerHub') {
             steps {
-                script {
-                    echo "[STAGE_START] Push to DockerHub"
-                }
-
+                script { echo "[STAGE_START] Push to DockerHub" }
                 script {
                     withCredentials([usernamePassword(
                         credentialsId: 'dockerhub-cred',
@@ -327,33 +272,22 @@ except:
                     )]) {
                         sh '''
                             echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
-
                             docker tag auto-app:${APP_ID} ${DOCKER_USER}/auto-app:${APP_ID}
                             docker tag auto-app:${APP_ID} ${DOCKER_USER}/auto-app:latest
-
                             docker push ${DOCKER_USER}/auto-app:${APP_ID}
                             docker push ${DOCKER_USER}/auto-app:latest
-
                             echo "[META] DOCKER_IMAGE=${DOCKER_USER}/auto-app:${APP_ID}"
                         '''
                     }
                 }
-
-                script {
-                    echo "[STAGE_SUCCESS] Push to DockerHub"
-                }
+                script { echo "[STAGE_SUCCESS] Push to DockerHub" }
             }
         }
 
         stage('Stop Old Container') {
             steps {
                 script { echo "[STAGE_START] Stop Old Container" }
-
-                sh '''
-                    docker stop app_${APP_ID} || true
-                    docker rm app_${APP_ID} || true
-                '''
-
+                sh 'docker stop app_${APP_ID} || true && docker rm app_${APP_ID} || true'
                 script { echo "[STAGE_SUCCESS] Stop Old Container" }
             }
         }
@@ -364,26 +298,11 @@ except:
                     echo "[STAGE_START] Run Container"
 
                     if (env.STACK == "django") {
-                        sh """
-                        docker run -d \
-                        --name ${CONTAINER_NAME} \
-                        -p ${EXTERNAL_PORT}:8000 \
-                        auto-app:${APP_ID}
-                        """
+                        sh "docker run -d --name ${CONTAINER_NAME} -p ${EXTERNAL_PORT}:8000 auto-app:${APP_ID}"
                     } else if (env.STACK == "vite") {
-                        sh """
-                        docker run -d \
-                        --name ${CONTAINER_NAME} \
-                        -p ${EXTERNAL_PORT}:80 \
-                        auto-app:${APP_ID}
-                        """
+                        sh "docker run -d --name ${CONTAINER_NAME} -p ${EXTERNAL_PORT}:80 auto-app:${APP_ID}"
                     } else {
-                        sh """
-                        docker run -d \
-                        --name ${CONTAINER_NAME} \
-                        -p ${EXTERNAL_PORT}:3000 \
-                        auto-app:${APP_ID}
-                        """
+                        sh "docker run -d --name ${CONTAINER_NAME} -p ${EXTERNAL_PORT}:3000 auto-app:${APP_ID}"
                     }
 
                     echo "[STAGE_SUCCESS] Run Container"
@@ -394,9 +313,7 @@ except:
         stage('Verify') {
             steps {
                 script { echo "[STAGE_START] Verify" }
-
                 sh 'docker ps'
-
                 script {
                     echo "[META] URL=http://192.168.122.127:${EXTERNAL_PORT}"
                     echo "[STAGE_SUCCESS] Verify"
@@ -411,7 +328,6 @@ except:
             echo "[META] FINAL_STATUS=success"
             echo "[META] URL=http://192.168.122.127:${EXTERNAL_PORT}"
         }
-
         failure {
             echo "[DEPLOY_FAILED]"
             echo "[META] FINAL_STATUS=failed"
