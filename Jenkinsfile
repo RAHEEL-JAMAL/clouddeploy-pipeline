@@ -140,15 +140,34 @@ pipeline {
             steps {
                 script {
                     echo "[STAGE_START] Create Dockerfile"
-                    if (!fileExists('app/Dockerfile')) {
-                        if (env.STACK == "django") {
+
+                    if (env.STACK == "vite") {
+                        // ── BUILD ON HOST (Jenkins), not inside Docker ──────────
+                        // This avoids npm network issues inside Docker build
+                        sh '''
+                            cd app
+                            npm install --prefer-offline --no-audit 2>&1 || npm install 2>&1
+                            npm run build 2>&1
+                        '''
+                        // Minimal Dockerfile — just copy pre-built dist into nginx
+                        writeFile file: 'app/Dockerfile', text: 'FROM nginx:alpine\nCOPY dist /usr/share/nginx/html\nEXPOSE 80\nCMD ["nginx", "-g", "daemon off;"]\n'
+
+                    } else if (env.STACK == "django") {
+                        if (!fileExists('app/Dockerfile')) {
                             writeFile file: 'app/Dockerfile', text: 'FROM python:3.11\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt || true\nEXPOSE 8000\nCMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]\n'
-                        } else if (env.STACK == "vite") {
-                            writeFile file: 'app/Dockerfile', text: 'FROM node:20-alpine AS build\nWORKDIR /app\nCOPY . .\nRUN npm install || true\nRUN npm run build || true\n\nFROM nginx:alpine\nCOPY --from=build /app/dist /usr/share/nginx/html\nEXPOSE 80\nCMD ["nginx", "-g", "daemon off;"]\n'
-                        } else {
-                            writeFile file: 'app/Dockerfile', text: 'FROM node:20-alpine\nWORKDIR /app\nCOPY . .\nRUN npm install || true\nENV PORT=3000\nEXPOSE 3000\nCMD sh -c "PORT=3000 node server.js || PORT=3000 node index.js || PORT=3000 npm start"\n'
+                        }
+
+                    } else {
+                        // Node — build on host too, then copy
+                        sh '''
+                            cd app
+                            npm install --prefer-offline --no-audit 2>&1 || npm install 2>&1
+                        '''
+                        if (!fileExists('app/Dockerfile')) {
+                            writeFile file: 'app/Dockerfile', text: 'FROM node:20-alpine\nWORKDIR /app\nCOPY . .\nEXPOSE 3000\nCMD sh -c "PORT=3000 node server.js || PORT=3000 node index.js || PORT=3000 npm start"\n'
                         }
                     }
+
                     echo "[STAGE_SUCCESS] Create Dockerfile"
                 }
             }
@@ -192,11 +211,13 @@ pipeline {
                 script { echo "[STAGE_START] Push to DockerHub" }
                 withCredentials([usernamePassword(credentialsId: 'dockerhub-cred', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
                     sh 'echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin'
+                    // Tag with APP_ID only — skip :latest to avoid re-uploading all layers
                     sh 'docker tag auto-app:${APP_ID} ${DOCKER_USER}/auto-app:${APP_ID}'
-                    sh 'docker tag auto-app:${APP_ID} ${DOCKER_USER}/auto-app:latest'
                     sh 'docker push ${DOCKER_USER}/auto-app:${APP_ID}'
-                    sh 'docker push ${DOCKER_USER}/auto-app:latest'
                     sh 'echo "[META] DOCKER_IMAGE=${DOCKER_USER}/auto-app:${APP_ID}"'
+                    // Update latest tag by reusing already-pushed layers (fast — metadata only)
+                    sh 'docker tag auto-app:${APP_ID} ${DOCKER_USER}/auto-app:latest'
+                    sh 'docker push ${DOCKER_USER}/auto-app:latest'
                 }
                 script { echo "[STAGE_SUCCESS] Push to DockerHub" }
             }
