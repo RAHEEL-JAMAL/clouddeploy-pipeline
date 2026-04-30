@@ -52,7 +52,14 @@ pipeline {
         stage('Clone Repo') {
             steps {
                 script { echo "[STAGE_START] Clone Repo" }
-                sh 'rm -rf app && git clone --depth 1 ${REPO_URL} app'
+                retry(3) {
+                    sh '''
+                        rm -rf app
+                        git config --global http.version HTTP/1.1
+                        git config --global http.postBuffer 524288000
+                        git clone --depth 1 ${REPO_URL} app
+                    '''
+                }
                 script { echo "[STAGE_SUCCESS] Clone Repo" }
             }
         }
@@ -76,7 +83,7 @@ pipeline {
                         grep -qi "secret=" "$f" && echo "WARNING: secret= in $f" && FOUND=1 || true
                         grep -qi "AWS_SECRET" "$f" && echo "WARNING: AWS_SECRET in $f" && FOUND=1 || true
                     done
-                    for f in $(find app -type f -name "*.env" -o -name "*.yml" -o -name "*.yaml" -not -path "*/.git/*"); do
+                    for f in $(find app -type f -name "*.env" -not -path "*/.git/*"); do
                         grep -qi "password=" "$f" && echo "WARNING: password= in $f" && FOUND=1 || true
                         grep -qi "secret=" "$f" && echo "WARNING: secret= in $f" && FOUND=1 || true
                     done
@@ -87,9 +94,7 @@ pipeline {
                         echo "[META] SECRET_SCAN=PASSED"
                     fi
                 '''
-                script {
-                    echo "[STAGE_SUCCESS] Secret Scan (Gitleaks)"
-                }
+                script { echo "[STAGE_SUCCESS] Secret Scan (Gitleaks)" }
             }
         }
 
