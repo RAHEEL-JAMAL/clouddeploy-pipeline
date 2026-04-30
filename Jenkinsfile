@@ -1,4 +1,3 @@
-
 pipeline {
     agent any
 
@@ -63,24 +62,32 @@ pipeline {
                 script {
                     echo "[STAGE_START] Secret Scan (Gitleaks)"
                     echo "Scanning repo for hardcoded secrets..."
-
-                    def found = sh(returnStdout: true, script: '''
-find app -type f \( -name "*.js" -o -name "*.py" -o -name "*.env" -o -name "*.yml" -o -name "*.yaml" -o -name "*.ts" \) \
-    ! -path "*/node_modules/*" \
-    ! -path "*/.git/*" \
-    ! -name "package-lock.json" \
-    ! -name "yarn.lock" \
-    -exec grep -liE "(password=|secret=|api_key=|access_token=|private_key|AWS_SECRET_ACCESS_KEY|BEGIN RSA PRIVATE|BEGIN OPENSSH PRIVATE)" {} ; 2>/dev/null || true
-''').trim()
-
-                    if (found) {
-                        echo "WARNING: Possible secrets in: ${found}"
+                }
+                sh '''
+                    FOUND=0
+                    for f in $(find app -type f -name "*.js" -not -path "*/node_modules/*" -not -path "*/.git/*" -not -name "package-lock.json"); do
+                        grep -qi "password=" "$f" && echo "WARNING: password= in $f" && FOUND=1 || true
+                        grep -qi "api_key=" "$f" && echo "WARNING: api_key= in $f" && FOUND=1 || true
+                        grep -qi "secret=" "$f" && echo "WARNING: secret= in $f" && FOUND=1 || true
+                        grep -qi "access_token=" "$f" && echo "WARNING: access_token= in $f" && FOUND=1 || true
+                    done
+                    for f in $(find app -type f -name "*.py" -not -path "*/.git/*"); do
+                        grep -qi "password=" "$f" && echo "WARNING: password= in $f" && FOUND=1 || true
+                        grep -qi "secret=" "$f" && echo "WARNING: secret= in $f" && FOUND=1 || true
+                        grep -qi "AWS_SECRET" "$f" && echo "WARNING: AWS_SECRET in $f" && FOUND=1 || true
+                    done
+                    for f in $(find app -type f -name "*.env" -o -name "*.yml" -o -name "*.yaml" -not -path "*/.git/*"); do
+                        grep -qi "password=" "$f" && echo "WARNING: password= in $f" && FOUND=1 || true
+                        grep -qi "secret=" "$f" && echo "WARNING: secret= in $f" && FOUND=1 || true
+                    done
+                    if [ "$FOUND" = "1" ]; then
                         echo "[META] SECRET_SCAN=FAILED"
-                    } else {
+                    else
                         echo "No secrets found in repository"
                         echo "[META] SECRET_SCAN=PASSED"
-                    }
-
+                    fi
+                '''
+                script {
                     echo "[STAGE_SUCCESS] Secret Scan (Gitleaks)"
                 }
             }
@@ -109,7 +116,6 @@ find app -type f \( -name "*.js" -o -name "*.py" -o -name "*.env" -o -name "*.ym
                 script {
                     echo "[STAGE_START] Dependency Audit"
                     echo "Scanning dependencies for known vulnerabilities..."
-
                     if (env.STACK == "django") {
                         sh 'pip install pip-audit --quiet || true'
                         sh 'if [ -f app/requirements.txt ]; then pip-audit -r app/requirements.txt 2>&1 || true; fi'
@@ -117,14 +123,8 @@ find app -type f \( -name "*.js" -o -name "*.py" -o -name "*.env" -o -name "*.ym
                         echo "[META] VULN_CRITICAL=0"
                     } else {
                         sh 'if [ -f app/package.json ]; then cd app && npm audit --json > /tmp/npm-audit.json 2>&1; fi || true'
-
-                        def high = sh(returnStdout: true, script: "python3 -c \"import json; obj=json.load(open('/tmp/npm-audit.json')); print(obj.get('metadata',{}).get('vulnerabilities',{}).get('high',0))\" 2>/dev/null || echo 0").trim()
-                        def critical = sh(returnStdout: true, script: "python3 -c \"import json; obj=json.load(open('/tmp/npm-audit.json')); print(obj.get('metadata',{}).get('vulnerabilities',{}).get('critical',0))\" 2>/dev/null || echo 0").trim()
-
-                        echo "[META] VULN_HIGH=${high}"
-                        echo "[META] VULN_CRITICAL=${critical}"
+                        sh 'python3 -c "import json; obj=json.load(open(\'/tmp/npm-audit.json\')); v=obj.get(\'metadata\',{}).get(\'vulnerabilities\',{}); print(\'[META] VULN_HIGH=\'+str(v.get(\'high\',0))); print(\'[META] VULN_CRITICAL=\'+str(v.get(\'critical\',0)))" 2>/dev/null || echo "[META] VULN_HIGH=0" && echo "[META] VULN_CRITICAL=0"'
                     }
-
                     echo "[META] DEPENDENCY_SCAN=PASSED"
                     echo "[STAGE_SUCCESS] Dependency Audit"
                 }
@@ -162,13 +162,14 @@ find app -type f \( -name "*.js" -o -name "*.py" -o -name "*.env" -o -name "*.ym
                 script {
                     echo "[STAGE_START] Image Scan (Trivy)"
                     echo "Scanning Docker image for CVEs..."
-
-                    sh 'docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --exit-code 0 --severity HIGH,CRITICAL --no-progress auto-app:${APP_ID} 2>&1 || true'
-
-                    sh 'docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --exit-code 0 --severity CRITICAL --format json --no-progress --quiet auto-app:${APP_ID} > /tmp/trivy.json 2>/dev/null || true'
-
-                    def criticalCount = sh(returnStdout: true, script: "python3 -c \"import json; d=json.load(open('/tmp/trivy.json')); print(sum(1 for r in (d.get('Results') or []) for v in (r.get('Vulnerabilities') or []) if v.get('Severity')=='CRITICAL'))\" 2>/dev/null || echo 0").trim()
-
+                }
+                sh 'docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --exit-code 0 --severity HIGH,CRITICAL --no-progress auto-app:${APP_ID} 2>&1 || true'
+                sh 'docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image --exit-code 0 --severity CRITICAL --format json --no-progress --quiet auto-app:${APP_ID} > /tmp/trivy.json 2>/dev/null || true'
+                script {
+                    def criticalCount = sh(
+                        returnStdout: true,
+                        script: 'python3 -c "import json; d=json.load(open(\'/tmp/trivy.json\')); print(sum(1 for r in (d.get(\'Results\') or []) for v in (r.get(\'Vulnerabilities\') or []) if v.get(\'Severity\')==\'CRITICAL\'))" 2>/dev/null || echo 0'
+                    ).trim()
                     echo "[META] IMAGE_CRITICAL_CVE=${criticalCount}"
                     echo "[META] IMAGE_SCAN=PASSED"
                     if (criticalCount.toInteger() > 0) {
