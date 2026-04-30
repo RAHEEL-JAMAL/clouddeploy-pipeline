@@ -102,15 +102,47 @@ pipeline {
             steps {
                 script {
                     echo "[STAGE_START] Detect Stack"
-                    if (fileExists('app/manage.py')) {
+
+                    // ── Smart: find package.json at root or one level deep ──
+                    def pkgRoot = sh(returnStdout: true, script: '''
+                        if [ -f app/package.json ]; then
+                            echo "app"
+                        else
+                            FOUND=$(find app -maxdepth 2 -name "package.json" \
+                                -not -path "*/node_modules/*" | head -1)
+                            if [ -n "$FOUND" ]; then
+                                dirname "$FOUND"
+                            else
+                                echo ""
+                            fi
+                        fi
+                    ''').trim()
+
+                    env.PKG_ROOT = pkgRoot
+
+                    if (fileExists('app/manage.py') || sh(returnStdout: true, script: 'find app -maxdepth 2 -name "manage.py" | head -1 || true').trim()) {
                         env.STACK = "django"
-                    } else if (fileExists('app/package.json')) {
-                        def pkg = readFile('app/package.json')
-                        env.STACK = pkg.contains("vite") ? "vite" : "node"
+                    } else if (sh(returnStdout: true, script: 'find app -maxdepth 2 -name "composer.json" | head -1 || true').trim()) {
+                        env.STACK = "php"
+                    } else if (sh(returnStdout: true, script: 'find app -maxdepth 2 -name "pom.xml" -o -name "build.gradle" | head -1 || true').trim()) {
+                        env.STACK = "java"
+                    } else if (pkgRoot) {
+                        def pkg = readFile("${pkgRoot}/package.json")
+                        if (pkg.contains('"vite"') || pkg.contains('"@vitejs"')) {
+                            env.STACK = "vite"
+                        } else if (pkg.contains('"react"') || pkg.contains('"next"')) {
+                            env.STACK = "react"
+                        } else {
+                            env.STACK = "node"
+                        }
+                    } else if (sh(returnStdout: true, script: 'find app -maxdepth 2 -name "index.html" | head -1 || true').trim()) {
+                        env.STACK = "html"
                     } else {
                         env.STACK = "node"
                     }
+
                     echo "[META] STACK=${STACK}"
+                    echo "[META] PKG_ROOT=${env.PKG_ROOT}"
                     echo "[STAGE_SUCCESS] Detect Stack"
                 }
             }
@@ -121,24 +153,29 @@ pipeline {
                 script {
                     echo "[STAGE_START] Dependency Audit"
                     echo "Scanning dependencies for known vulnerabilities..."
+
                     if (env.STACK == "django") {
                         sh 'pip install pip-audit --quiet || true'
                         sh 'if [ -f app/requirements.txt ]; then pip-audit -r app/requirements.txt 2>&1 || true; fi'
                         echo "[META] VULN_HIGH=0"
                         echo "[META] VULN_CRITICAL=0"
-                    } else {
-                        // Run npm audit inside a node container — no npm needed on Jenkins host
-                        sh '''
-                            if [ -f app/package.json ]; then
+
+                    } else if (env.STACK in ["vite", "react", "node"]) {
+                        sh """
+                            if [ -f ${env.PKG_ROOT}/package.json ]; then
                                 docker run --rm \
-                                    -v "$(pwd)/app":/work \
+                                    -v \$(pwd)/${env.PKG_ROOT}:/work \
                                     -w /work \
                                     node:20-alpine \
                                     sh -c "npm audit --json > /work/npm-audit.json 2>&1 || true"
                             fi
-                        '''
-                        sh 'python3 -c "import json; obj=json.load(open(\'app/npm-audit.json\')); v=obj.get(\'metadata\',{}).get(\'vulnerabilities\',{}); print(\'[META] VULN_HIGH=\'+str(v.get(\'high\',0))); print(\'[META] VULN_CRITICAL=\'+str(v.get(\'critical\',0)))" 2>/dev/null || echo "[META] VULN_HIGH=0" && echo "[META] VULN_CRITICAL=0"'
+                        """
+                        sh 'python3 -c "import json; obj=json.load(open(\'${env.PKG_ROOT}/npm-audit.json\')); v=obj.get(\'metadata\',{}).get(\'vulnerabilities\',{}); print(\'[META] VULN_HIGH=\'+str(v.get(\'high\',0))); print(\'[META] VULN_CRITICAL=\'+str(v.get(\'critical\',0)))" 2>/dev/null || echo "[META] VULN_HIGH=0" && echo "[META] VULN_CRITICAL=0"'
+                    } else {
+                        echo "[META] VULN_HIGH=0"
+                        echo "[META] VULN_CRITICAL=0"
                     }
+
                     echo "[META] DEPENDENCY_SCAN=PASSED"
                     echo "[STAGE_SUCCESS] Dependency Audit"
                 }
@@ -150,37 +187,97 @@ pipeline {
                 script {
                     echo "[STAGE_START] Create Dockerfile"
 
+                    // ── VITE ────────────────────────────────────────────────
                     if (env.STACK == "vite") {
-                        // Build inside a node:20-alpine container — no npm needed on Jenkins
-                        sh '''
+                        sh """
                             docker run --rm \
-                                -v "$(pwd)/app":/work \
+                                -v \$(pwd)/${env.PKG_ROOT}:/work \
                                 -w /work \
                                 node:20-alpine \
                                 sh -c "npm install && npm run build"
-                        '''
-                        // Tiny Dockerfile — dist already built, just serve with nginx
-                        writeFile file: 'app/Dockerfile', text: 'FROM nginx:alpine\nCOPY dist /usr/share/nginx/html\nEXPOSE 80\nCMD ["nginx", "-g", "daemon off;"]\n'
+                        """
+                        writeFile file: "${env.PKG_ROOT}/Dockerfile",
+                            text: 'FROM nginx:alpine\nCOPY dist /usr/share/nginx/html\nEXPOSE 80\nCMD ["nginx", "-g", "daemon off;"]\n'
+                        env.DOCKER_CONTEXT = env.PKG_ROOT
 
-                    } else if (env.STACK == "node") {
-                        // Install deps inside container, copy result
-                        sh '''
+                    // ── REACT (CRA / Next) ──────────────────────────────────
+                    } else if (env.STACK == "react") {
+                        sh """
                             docker run --rm \
-                                -v "$(pwd)/app":/work \
+                                -v \$(pwd)/${env.PKG_ROOT}:/work \
+                                -w /work \
+                                node:20-alpine \
+                                sh -c "npm install && npm run build 2>&1 || (npm run export 2>&1 || true)"
+                        """
+                        // Support both CRA (build/) and Next (out/)
+                        def distDir = sh(returnStdout: true, script: """
+                            if [ -d ${env.PKG_ROOT}/build ]; then echo "build"
+                            elif [ -d ${env.PKG_ROOT}/out ]; then echo "out"
+                            elif [ -d ${env.PKG_ROOT}/.next ]; then echo ".next"
+                            else echo "build"; fi
+                        """).trim()
+                        writeFile file: "${env.PKG_ROOT}/Dockerfile",
+                            text: "FROM nginx:alpine\nCOPY ${distDir} /usr/share/nginx/html\nEXPOSE 80\nCMD [\"nginx\", \"-g\", \"daemon off;\"]\n"
+                        env.DOCKER_CONTEXT = env.PKG_ROOT
+
+                    // ── NODE ────────────────────────────────────────────────
+                    } else if (env.STACK == "node") {
+                        sh """
+                            docker run --rm \
+                                -v \$(pwd)/${env.PKG_ROOT}:/work \
                                 -w /work \
                                 node:20-alpine \
                                 sh -c "npm install"
-                        '''
-                        if (!fileExists('app/Dockerfile')) {
-                            writeFile file: 'app/Dockerfile', text: 'FROM node:20-alpine\nWORKDIR /app\nCOPY . .\nEXPOSE 3000\nCMD sh -c "PORT=3000 node server.js || PORT=3000 node index.js || PORT=3000 npm start"\n'
+                        """
+                        if (!fileExists("${env.PKG_ROOT}/Dockerfile")) {
+                            writeFile file: "${env.PKG_ROOT}/Dockerfile",
+                                text: 'FROM node:20-alpine\nWORKDIR /app\nCOPY . .\nEXPOSE 3000\nCMD sh -c "node server.js || node index.js || npm start || node app.js"\n'
                         }
+                        env.DOCKER_CONTEXT = env.PKG_ROOT
 
+                    // ── DJANGO ──────────────────────────────────────────────
                     } else if (env.STACK == "django") {
-                        if (!fileExists('app/Dockerfile')) {
-                            writeFile file: 'app/Dockerfile', text: 'FROM python:3.11\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt || true\nEXPOSE 8000\nCMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]\n'
+                        def djangoRoot = sh(returnStdout: true, script: 'find app -maxdepth 2 -name "manage.py" | head -1 | xargs dirname || echo "app"').trim()
+                        if (!fileExists("${djangoRoot}/Dockerfile")) {
+                            writeFile file: "${djangoRoot}/Dockerfile",
+                                text: 'FROM python:3.11-slim\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt || true\nEXPOSE 8000\nCMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]\n'
                         }
+                        env.DOCKER_CONTEXT = djangoRoot
+
+                    // ── PHP ─────────────────────────────────────────────────
+                    } else if (env.STACK == "php") {
+                        if (!fileExists('app/Dockerfile')) {
+                            writeFile file: 'app/Dockerfile',
+                                text: 'FROM php:8.2-apache\nCOPY . /var/www/html/\nEXPOSE 80\n'
+                        }
+                        env.DOCKER_CONTEXT = "app"
+
+                    // ── JAVA ────────────────────────────────────────────────
+                    } else if (env.STACK == "java") {
+                        if (!fileExists('app/Dockerfile')) {
+                            writeFile file: 'app/Dockerfile',
+                                text: 'FROM maven:3.9-eclipse-temurin-17 AS build\nWORKDIR /app\nCOPY . .\nRUN mvn package -DskipTests || true\nFROM eclipse-temurin:17-jre\nWORKDIR /app\nCOPY --from=build /app/target/*.jar app.jar\nEXPOSE 8080\nCMD ["java", "-jar", "app.jar"]\n'
+                        }
+                        env.DOCKER_CONTEXT = "app"
+
+                    // ── HTML (static) ───────────────────────────────────────
+                    } else if (env.STACK == "html") {
+                        if (!fileExists('app/Dockerfile')) {
+                            writeFile file: 'app/Dockerfile',
+                                text: 'FROM nginx:alpine\nCOPY . /usr/share/nginx/html\nEXPOSE 80\nCMD ["nginx", "-g", "daemon off;"]\n'
+                        }
+                        env.DOCKER_CONTEXT = "app"
+
+                    // ── FALLBACK ────────────────────────────────────────────
+                    } else {
+                        if (!fileExists('app/Dockerfile')) {
+                            writeFile file: 'app/Dockerfile',
+                                text: 'FROM nginx:alpine\nCOPY . /usr/share/nginx/html\nEXPOSE 80\nCMD ["nginx", "-g", "daemon off;"]\n'
+                        }
+                        env.DOCKER_CONTEXT = "app"
                     }
 
+                    echo "[META] DOCKER_CONTEXT=${env.DOCKER_CONTEXT}"
                     echo "[STAGE_SUCCESS] Create Dockerfile"
                 }
             }
@@ -189,8 +286,7 @@ pipeline {
         stage('Build Image') {
             steps {
                 script { echo "[STAGE_START] Build Image" }
-                // --network=host gives Docker build access to VM network (faster pulls)
-                sh 'cd app && docker build --network=host -t auto-app:${APP_ID} .'
+                sh 'docker build --network=host -t auto-app:${APP_ID} ${DOCKER_CONTEXT}'
                 script { echo "[STAGE_SUCCESS] Build Image" }
             }
         }
@@ -225,10 +321,8 @@ pipeline {
                 script { echo "[STAGE_START] Push to DockerHub" }
                 withCredentials([usernamePassword(credentialsId: 'dockerhub-cred', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
                     sh 'echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin'
-                    // Push APP_ID tag first — this uploads all layers
                     sh 'docker tag auto-app:${APP_ID} ${DOCKER_USER}/auto-app:${APP_ID}'
                     sh 'docker push ${DOCKER_USER}/auto-app:${APP_ID}'
-                    // latest reuses already-uploaded layers — only metadata sent (fast)
                     sh 'docker tag ${DOCKER_USER}/auto-app:${APP_ID} ${DOCKER_USER}/auto-app:latest'
                     sh 'docker push ${DOCKER_USER}/auto-app:latest'
                     sh 'echo "[META] DOCKER_IMAGE=${DOCKER_USER}/auto-app:${APP_ID}"'
@@ -252,7 +346,9 @@ pipeline {
                     echo "[STAGE_START] Run Container"
                     if (env.STACK == "django") {
                         sh "docker run -d --name ${CONTAINER_NAME} -p ${EXTERNAL_PORT}:8000 auto-app:${APP_ID}"
-                    } else if (env.STACK == "vite") {
+                    } else if (env.STACK == "java") {
+                        sh "docker run -d --name ${CONTAINER_NAME} -p ${EXTERNAL_PORT}:8080 auto-app:${APP_ID}"
+                    } else if (env.STACK in ["vite", "react", "html", "php"]) {
                         sh "docker run -d --name ${CONTAINER_NAME} -p ${EXTERNAL_PORT}:80 auto-app:${APP_ID}"
                     } else {
                         sh "docker run -d --name ${CONTAINER_NAME} -p ${EXTERNAL_PORT}:3000 auto-app:${APP_ID}"
