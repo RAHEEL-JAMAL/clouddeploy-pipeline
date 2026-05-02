@@ -359,7 +359,7 @@ CMD ["sh", "-c", "echo Unknown stack && sleep 9999"]
                 script { echo '[STAGE_SUCCESS] Verify' }
             }
         }
-    }
+    
 
     post {
         success {
