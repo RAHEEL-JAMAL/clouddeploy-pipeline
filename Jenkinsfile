@@ -85,7 +85,10 @@ pipeline {
                 git config --global http.version HTTP/1.1
                 git config --global http.postBuffer 524288000
 
-                GIT_TERMINAL_PROMPT=0 git clone --depth 1 https://github.com/evertramos/docker-php-app.git app
+                # 🔥 IMPORTANT FIX: allow non-interactive safe clone
+                unset GIT_TERMINAL_PROMPT
+
+                git clone --depth 1 https://github.com/evertramos/docker-php-app.git app
             '''
         }
 
@@ -94,7 +97,6 @@ pipeline {
         }
     }
 }
-
         /* =========================
            🔥 ADDED: .dockerignore
            ========================= */
