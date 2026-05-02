@@ -231,10 +231,14 @@ EOF
             }
         }
 
-     stage('Create Dockerfile') {
+    stage('Create Dockerfile') {
     steps {
         script {
             echo '[STAGE_START] Create Dockerfile'
+
+            // 🔥 Safety log (helps debugging in Jenkins)
+            echo "[INFO] STACK=${env.STACK}"
+            echo "[INFO] PKG_ROOT=${env.PKG_ROOT}"
 
             def df = ''
 
@@ -245,19 +249,18 @@ EOF
                     df = '''FROM node:20-alpine AS builder
 WORKDIR /app
 
-# 🔥 FIX: copy package files first (fixes npm install crash)
+# 🔥 FIX: install from correct context (monorepo safe)
 COPY package*.json ./
-
-# 🔥 FIX: stable install for CI/CD pipelines
 RUN npm install --legacy-peer-deps
 
-# then copy rest of code
+# copy full source after install
 COPY . .
 
 RUN npm run build
 
 FROM nginx:alpine
 COPY --from=builder /app/dist /usr/share/nginx/html
+
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
 '''
@@ -266,17 +269,22 @@ CMD ["nginx", "-g", "daemon off;"]
                 case 'nextjs':
                     df = '''FROM node:20-alpine AS builder
 WORKDIR /app
+
 COPY package*.json ./
 RUN npm install --legacy-peer-deps
+
 COPY . .
 RUN npm run build
 
 FROM node:20-alpine
 WORKDIR /app
+
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/package.json ./
+
 RUN npm install --omit=dev
+
 EXPOSE 3000
 CMD ["npm", "start"]
 '''
@@ -285,9 +293,12 @@ CMD ["npm", "start"]
                 case 'node':
                     df = '''FROM node:20-alpine
 WORKDIR /app
+
 COPY package*.json ./
 RUN npm install --legacy-peer-deps --omit=dev
+
 COPY . .
+
 EXPOSE 3000
 CMD ["node", "index.js"]
 '''
@@ -296,8 +307,11 @@ CMD ["node", "index.js"]
                 case 'django':
                     df = '''FROM python:3.11-slim
 WORKDIR /app
+
 COPY . .
+
 RUN pip install --no-cache-dir -r requirements.txt
+
 EXPOSE 8000
 CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
 '''
@@ -312,6 +326,7 @@ CMD ["echo", "Unknown stack"]
 '''
             }
 
+            // 🔥 IMPORTANT: write into detected project root
             writeFile file: "${env.PKG_ROOT}/Dockerfile", text: df
 
             echo '[META] DOCKERFILE_CREATED=true'
@@ -319,15 +334,43 @@ CMD ["echo", "Unknown stack"]
         }
     }
 }
+        stage('Detect App Root') {
+    steps {
+        script {
+            echo '[STAGE_START] Detect App Root'
 
-        stage('Build Image') {
+            sh '''
+                echo "Scanning repo structure..."
+
+                if [ -f package.json ]; then
+                    echo "APP_ROOT=." > app.env
+                elif [ -f app/package.json ]; then
+                    echo "APP_ROOT=app" > app.env
+                elif [ -f frontend/package.json ]; then
+                    echo "APP_ROOT=frontend" > app.env
+                else
+                    echo "APP_ROOT=unknown" > app.env
+                fi
+            '''
+
+            def props = readFile('app.env').trim()
+            env.APP_ROOT = props.split('=')[1]
+
+            echo "[META] APP_ROOT=${env.APP_ROOT}"
+            echo '[STAGE_SUCCESS] Detect App Root'
+        }
+    }
+}
+
+    stage('Build Image') {
     steps {
         script { echo '[STAGE_START] Build Image' }
 
-        sh '''
-            cd "${PKG_ROOT}"
-            docker build --network=host -t "${IMAGE_NAME}" .
-        '''
+        sh """
+            docker build --network=host \
+            -t ${IMAGE_NAME} \
+            ${APP_ROOT}
+        """
 
         script { echo '[STAGE_SUCCESS] Build Image' }
     }
