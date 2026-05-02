@@ -60,7 +60,11 @@ pipeline {
 
                     def usedPorts = usedRaw ? usedRaw.split('\n').toList() : []
                     def port = 3000
-                    while (usedPorts.contains(port.toString())) { port++ }
+
+                    while (usedPorts.contains(port.toString())) {
+                        port++
+                    }
+
                     env.PORT = port.toString()
 
                     echo "[META] PORT=${env.PORT}"
@@ -72,6 +76,7 @@ pipeline {
         stage('Clone Repo') {
             steps {
                 script { echo '[STAGE_START] Clone Repo' }
+
                 retry(3) {
                     sh '''
                         rm -rf app
@@ -80,6 +85,7 @@ pipeline {
                         git clone --depth 1 "${REPO_URL}" app
                     '''
                 }
+
                 script { echo '[STAGE_SUCCESS] Clone Repo' }
             }
         }
@@ -90,6 +96,7 @@ pipeline {
                     echo '[STAGE_START] Secret Scan'
                     echo 'Scanning repo for hardcoded secrets...'
                 }
+
                 sh '''#!/bin/bash
                     FOUND=0
 
@@ -97,6 +104,7 @@ pipeline {
                         -not -path "*/node_modules/*" \
                         -not -path "*/.git/*" \
                         -not -name "package-lock.json" | while read -r f; do
+
                         if grep -qiE "(password|api_key|secret|access_token)\\s*=" "$f"; then
                             echo "[WARN] Possible secret in: $f"
                             FOUND=1
@@ -111,6 +119,7 @@ pipeline {
                     echo "No secrets found."
                     echo "[META] SECRET_SCAN=PASSED"
                 '''
+
                 script { echo '[STAGE_SUCCESS] Secret Scan' }
             }
         }
@@ -125,19 +134,30 @@ pipeline {
 
                     if (fileExists('app/package.json')) {
                         def pkg = readFile('app/package.json')
+
                         if      (pkg.contains('"vite"'))   stack = 'vite'
                         else if (pkg.contains('"next"'))   stack = 'nextjs'
                         else if (pkg.contains('"react"'))  stack = 'react'
                         else                               stack = 'node'
                     } else {
+
                         def mp = sh(script: "find app -maxdepth 2 -name manage.py | head -1", returnStdout: true).trim()
-                        if (mp)  { stack = 'django'; pkgRoot = mp.replaceAll('/manage\\.py', '') }
+                        if (mp) {
+                            stack = 'django'
+                            pkgRoot = mp.replaceAll('/manage\\.py', '')
+                        }
 
                         def cp = sh(script: "find app -maxdepth 2 -name composer.json | head -1", returnStdout: true).trim()
-                        if (cp)  { stack = 'php'; pkgRoot = cp.replaceAll('/composer\\.json', '') }
+                        if (cp) {
+                            stack = 'php'
+                            pkgRoot = cp.replaceAll('/composer\\.json', '')
+                        }
 
                         def jp = sh(script: "find app -maxdepth 2 \\( -name pom.xml -o -name build.gradle \\) | head -1", returnStdout: true).trim()
-                        if (jp)  { stack = 'java'; pkgRoot = jp.replaceAll('/(pom\\.xml|build\\.gradle)', '') }
+                        if (jp) {
+                            stack = 'java'
+                            pkgRoot = jp.replaceAll('/(pom\\.xml|build\\.gradle)', '')
+                        }
                     }
 
                     env.STACK    = stack
@@ -154,29 +174,28 @@ pipeline {
             steps {
                 script {
                     echo '[STAGE_START] Dependency Audit'
-                    echo 'Scanning dependencies for known vulnerabilities...'
                 }
+
                 sh '''#!/bin/bash
                     set -e
+
                     if [ -f "${PKG_ROOT}/package.json" ]; then
-                        echo "Running npm audit inside Docker..."
+
                         ABS_PATH="$(cd "${PKG_ROOT}" && pwd)"
+
                         docker run --rm \
                             -v "${ABS_PATH}:/work" \
                             -w /work \
                             node:20-alpine \
                             sh -c "npm install --prefer-offline --no-fund 2>/dev/null; npm audit --json > /work/npm-audit.json 2>&1 || true"
 
-                        if [ -f "${PKG_ROOT}/npm-audit.json" ]; then
-                            VULN=$(grep -c '"severity"' "${PKG_ROOT}/npm-audit.json" || echo 0)
-                            echo "[META] DEPENDENCY_AUDIT=PASSED (severity hits: ${VULN})"
-                        else
-                            echo "[META] DEPENDENCY_AUDIT=SKIPPED (no output)"
-                        fi
+                        echo "[META] DEPENDENCY_AUDIT=DONE"
+
                     else
-                        echo "[META] DEPENDENCY_AUDIT=SKIPPED (no package.json)"
+                        echo "[META] DEPENDENCY_AUDIT=SKIPPED"
                     fi
                 '''
+
                 script { echo '[STAGE_SUCCESS] Dependency Audit' }
             }
         }
@@ -187,6 +206,7 @@ pipeline {
                     echo '[STAGE_START] Create Dockerfile'
 
                     def df = ''
+
                     switch (env.STACK) {
 
                         case 'vite':
@@ -194,11 +214,7 @@ pipeline {
                             df = '''FROM node:20-alpine AS builder
 WORKDIR /app
 COPY . .
-RUN if [ -f package-lock.json ]; then \
-      npm ci --legacy-peer-deps; \
-    else \
-      npm install --legacy-peer-deps; \
-    fi && npm run build
+RUN npm install && npm run build
 
 FROM nginx:alpine
 COPY --from=builder /app/dist /usr/share/nginx/html
@@ -211,22 +227,14 @@ CMD ["nginx", "-g", "daemon off;"]
                             df = '''FROM node:20-alpine AS builder
 WORKDIR /app
 COPY . .
-RUN if [ -f package-lock.json ]; then \
-      npm ci --legacy-peer-deps; \
-    else \
-      npm install --legacy-peer-deps; \
-    fi && npm run build
+RUN npm install && npm run build
 
 FROM node:20-alpine
 WORKDIR /app
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/package.json ./
-RUN if [ -f package-lock.json ]; then \
-      npm ci --omit=dev --legacy-peer-deps; \
-    else \
-      npm install --omit=dev --legacy-peer-deps; \
-    fi
+RUN npm install
 EXPOSE 3000
 CMD ["npm", "start"]
 '''
@@ -236,11 +244,7 @@ CMD ["npm", "start"]
                             df = '''FROM node:20-alpine
 WORKDIR /app
 COPY . .
-RUN if [ -f package-lock.json ]; then \
-      npm ci --omit=dev --legacy-peer-deps; \
-    else \
-      npm install --omit=dev --legacy-peer-deps; \
-    fi
+RUN npm install
 EXPOSE 3000
 CMD ["node", "index.js"]
 '''
@@ -250,17 +254,9 @@ CMD ["node", "index.js"]
                             df = '''FROM python:3.11-slim
 WORKDIR /app
 COPY . .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install -r requirements.txt
 EXPOSE 8000
 CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
-'''
-                            break
-
-                        case 'php':
-                            df = '''FROM php:8.2-apache
-WORKDIR /var/www/html
-COPY . .
-EXPOSE 80
 '''
                             break
 
@@ -269,18 +265,17 @@ EXPOSE 80
 WORKDIR /app
 COPY . .
 EXPOSE 3000
-CMD ["sh", "-c", "echo Unknown stack && sleep 9999"]
+CMD ["echo", "Unknown stack"]
 '''
                     }
 
                     writeFile file: "${env.PKG_ROOT}/Dockerfile", text: df
+
                     echo '[META] DOCKERFILE_CREATED=true'
                     echo '[STAGE_SUCCESS] Create Dockerfile'
                 }
             }
         }
-    }
-}
 
         stage('Build Image') {
             steps {
@@ -294,15 +289,11 @@ CMD ["sh", "-c", "echo Unknown stack && sleep 9999"]
             steps {
                 script { echo '[STAGE_START] Image Scan (Trivy)' }
                 sh '''
-                    echo "Running Trivy scan on: ${IMAGE_NAME}"
                     docker run --rm \
                         -v /var/run/docker.sock:/var/run/docker.sock \
                         aquasec/trivy:latest image \
-                        --exit-code 0 \
                         --severity HIGH,CRITICAL \
-                        --format table \
                         "${IMAGE_NAME}"
-                    echo "[META] IMAGE_SCAN=PASSED"
                 '''
                 script { echo '[STAGE_SUCCESS] Image Scan (Trivy)' }
             }
@@ -324,8 +315,8 @@ CMD ["sh", "-c", "echo Unknown stack && sleep 9999"]
             steps {
                 script { echo '[STAGE_START] Stop Old Container' }
                 sh '''
-                    docker stop "${CONTAINER_NAME}" 2>/dev/null || true
-                    docker rm   "${CONTAINER_NAME}" 2>/dev/null || true
+                    docker stop "${CONTAINER_NAME}" || true
+                    docker rm "${CONTAINER_NAME}" || true
                 '''
                 script { echo '[STAGE_SUCCESS] Stop Old Container' }
             }
@@ -334,7 +325,7 @@ CMD ["sh", "-c", "echo Unknown stack && sleep 9999"]
         stage('Run Container') {
             steps {
                 script { echo '[STAGE_START] Run Container' }
-                sh 'docker run -d --name "${CONTAINER_NAME}" -p "${PORT}:80" --restart unless-stopped "${IMAGE_NAME}"'
+                sh 'docker run -d --name "${CONTAINER_NAME}" -p "${PORT}:80" "${IMAGE_NAME}"'
                 script { echo '[STAGE_SUCCESS] Run Container' }
             }
         }
@@ -342,33 +333,20 @@ CMD ["sh", "-c", "echo Unknown stack && sleep 9999"]
         stage('Verify') {
             steps {
                 script { echo '[STAGE_START] Verify' }
-                sh '''#!/bin/bash
-                    sleep 5
-                    STATUS=$(docker inspect --format="{{.State.Running}}" "${CONTAINER_NAME}" 2>/dev/null || echo "false")
-                    if [ "$STATUS" = "true" ]; then
-                        echo "[META] CONTAINER_STATUS=RUNNING"
-                        echo "[META] DEPLOYED_PORT=${PORT}"
-                        echo "[META] FINAL_STATUS=success"
-                        echo "[DEPLOY_SUCCESS]"
-                    else
-                        echo "[META] FINAL_STATUS=failed"
-                        echo "[DEPLOY_FAILED]"
-                        exit 1
-                    fi
+                sh '''
+                    docker ps | grep "${CONTAINER_NAME}"
                 '''
                 script { echo '[STAGE_SUCCESS] Verify' }
             }
         }
-    
+    }
 
     post {
         success {
             echo '[DEPLOY_SUCCESS]'
-            echo '[META] FINAL_STATUS=success'
         }
         failure {
             echo '[DEPLOY_FAILED]'
-            echo '[META] FINAL_STATUS=failed'
         }
         always {
             echo '[META] Pipeline complete.'
