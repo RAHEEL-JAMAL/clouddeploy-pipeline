@@ -73,7 +73,7 @@ pipeline {
             }
         }
 
-       stage('Clone Repo') {
+     stage('Clone Repo') {
     steps {
         script {
             echo '[STAGE_START] Clone Repo'
@@ -82,12 +82,14 @@ pipeline {
         retry(2) {
             sh '''
                 rm -rf app
+
+                git config --global --unset credential.helper || true
+                git config --global --add safe.directory '*'
                 git config --global http.version HTTP/1.1
                 git config --global http.postBuffer 524288000
 
-                # 🔥 IMPORTANT FIX: allow non-interactive safe clone
-                unset GIT_TERMINAL_PROMPT
-
+                # 🔥 FORCE NON-AUTH MODE (IMPORTANT FIX)
+                GIT_ASKPASS=echo \
                 git clone --depth 1 https://github.com/evertramos/docker-php-app.git app
             '''
         }
