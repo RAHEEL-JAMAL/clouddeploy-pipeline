@@ -73,7 +73,7 @@ pipeline {
             }
         }
 
-     stage('Clone Repo') {
+   stage('Clone Repo') {
     steps {
         script {
             echo '[STAGE_START] Clone Repo'
@@ -83,14 +83,10 @@ pipeline {
             sh '''
                 rm -rf app
 
-                git config --global --unset credential.helper || true
-                git config --global --add safe.directory '*'
-                git config --global http.version HTTP/1.1
-                git config --global http.postBuffer 524288000
-
-                # 🔥 FORCE NON-AUTH MODE (IMPORTANT FIX)
-                GIT_ASKPASS=echo \
-                git clone --depth 1 https://github.com/evertramos/docker-php-app.git app
+                # 🔥 FORCE CLEAN PUBLIC CLONE MODE
+                git -c credential.helper= \
+                    -c http.extraHeader="AUTHORIZATION:" \
+                    clone --depth 1 https://github.com/evertramos/docker-php-app.git app
             '''
         }
 
@@ -98,8 +94,7 @@ pipeline {
             echo '[STAGE_SUCCESS] Clone Repo'
         }
     }
-}
-        /* =========================
+}     /* =========================
            🔥 ADDED: .dockerignore
            ========================= */
         stage('Setup Docker Ignore') {
