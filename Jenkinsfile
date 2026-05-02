@@ -188,6 +188,7 @@ pipeline {
 
                     def df = ''
                     switch (env.STACK) {
+
                         case 'vite':
                         case 'react':
                             df = '''FROM node:20-alpine AS builder
@@ -221,7 +222,6 @@ WORKDIR /app
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/package.json ./
-COPY --from=builder /app/package-lock.json ./ 2>/dev/null || true
 RUN if [ -f package-lock.json ]; then \
       npm ci --omit=dev --legacy-peer-deps; \
     else \
