@@ -73,28 +73,25 @@ pipeline {
             }
         }
 
-   stage('Clone Repo') {
+  stage('Clone Repo') {
     steps {
         script {
-            echo '[STAGE_START] Clone Repo'
+            echo '[STAGE_START] Download Repo'
         }
 
-        retry(2) {
-            sh '''
-                rm -rf app
-
-                # 🔥 FORCE CLEAN PUBLIC CLONE MODE
-                git -c credential.helper= \
-                    -c http.extraHeader="AUTHORIZATION:" \
-                    clone --depth 1 https://github.com/evertramos/docker-php-app.git app
-            '''
-        }
+        sh '''
+            rm -rf app
+            curl -L https://github.com/evertramos/docker-php-app/archive/refs/heads/main.zip -o app.zip
+            unzip app.zip
+            mv docker-php-app-main app
+            rm app.zip
+        '''
 
         script {
-            echo '[STAGE_SUCCESS] Clone Repo'
+            echo '[STAGE_SUCCESS] Repo Downloaded'
         }
     }
-}     /* =========================
+}==========
            🔥 ADDED: .dockerignore
            ========================= */
         stage('Setup Docker Ignore') {
