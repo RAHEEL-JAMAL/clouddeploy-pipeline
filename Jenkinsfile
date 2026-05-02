@@ -1,6 +1,10 @@
 pipeline {
     agent any
 
+    parameters {
+        string(name: 'REPO_URL', defaultValue: '', description: 'GitHub repository URL')
+    }
+
     environment {
         DOCKERHUB_CRED = credentials('dockerhub-cred')
         DOCKERHUB_USER = 'raheeljamal'
@@ -186,22 +190,87 @@ pipeline {
                     switch (env.STACK) {
                         case 'vite':
                         case 'react':
-                            df = 'FROM node:20-alpine AS builder\nWORKDIR /app\nCOPY . .\nRUN npm ci && npm run build\n\nFROM nginx:alpine\nCOPY --from=builder /app/dist /usr/share/nginx/html\nEXPOSE 80\nCMD ["nginx", "-g", "daemon off;"]\n'
+                            df = '''FROM node:20-alpine AS builder
+WORKDIR /app
+COPY . .
+RUN if [ -f package-lock.json ]; then \
+      npm ci --legacy-peer-deps; \
+    else \
+      npm install --legacy-peer-deps; \
+    fi && npm run build
+
+FROM nginx:alpine
+COPY --from=builder /app/dist /usr/share/nginx/html
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+'''
                             break
+
                         case 'nextjs':
-                            df = 'FROM node:20-alpine AS builder\nWORKDIR /app\nCOPY . .\nRUN npm ci && npm run build\n\nFROM node:20-alpine\nWORKDIR /app\nCOPY --from=builder /app/.next ./.next\nCOPY --from=builder /app/public ./public\nCOPY --from=builder /app/package.json ./\nRUN npm ci --omit=dev\nEXPOSE 3000\nCMD ["npm", "start"]\n'
+                            df = '''FROM node:20-alpine AS builder
+WORKDIR /app
+COPY . .
+RUN if [ -f package-lock.json ]; then \
+      npm ci --legacy-peer-deps; \
+    else \
+      npm install --legacy-peer-deps; \
+    fi && npm run build
+
+FROM node:20-alpine
+WORKDIR /app
+COPY --from=builder /app/.next ./.next
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/package.json ./
+COPY --from=builder /app/package-lock.json ./ 2>/dev/null || true
+RUN if [ -f package-lock.json ]; then \
+      npm ci --omit=dev --legacy-peer-deps; \
+    else \
+      npm install --omit=dev --legacy-peer-deps; \
+    fi
+EXPOSE 3000
+CMD ["npm", "start"]
+'''
                             break
+
                         case 'node':
-                            df = 'FROM node:20-alpine\nWORKDIR /app\nCOPY . .\nRUN npm ci --omit=dev\nEXPOSE 3000\nCMD ["node", "index.js"]\n'
+                            df = '''FROM node:20-alpine
+WORKDIR /app
+COPY . .
+RUN if [ -f package-lock.json ]; then \
+      npm ci --omit=dev --legacy-peer-deps; \
+    else \
+      npm install --omit=dev --legacy-peer-deps; \
+    fi
+EXPOSE 3000
+CMD ["node", "index.js"]
+'''
                             break
+
                         case 'django':
-                            df = 'FROM python:3.11-slim\nWORKDIR /app\nCOPY . .\nRUN pip install --no-cache-dir -r requirements.txt\nEXPOSE 8000\nCMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]\n'
+                            df = '''FROM python:3.11-slim
+WORKDIR /app
+COPY . .
+RUN pip install --no-cache-dir -r requirements.txt
+EXPOSE 8000
+CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+'''
                             break
+
                         case 'php':
-                            df = 'FROM php:8.2-apache\nWORKDIR /var/www/html\nCOPY . .\nEXPOSE 80\n'
+                            df = '''FROM php:8.2-apache
+WORKDIR /var/www/html
+COPY . .
+EXPOSE 80
+'''
                             break
+
                         default:
-                            df = 'FROM node:20-alpine\nWORKDIR /app\nCOPY . .\nEXPOSE 3000\nCMD ["sh", "-c", "echo Unknown stack && sleep 9999"]\n'
+                            df = '''FROM node:20-alpine
+WORKDIR /app
+COPY . .
+EXPOSE 3000
+CMD ["sh", "-c", "echo Unknown stack && sleep 9999"]
+'''
                     }
 
                     writeFile file: "${env.PKG_ROOT}/Dockerfile", text: df
@@ -210,6 +279,8 @@ pipeline {
                 }
             }
         }
+    }
+}
 
         stage('Build Image') {
             steps {
