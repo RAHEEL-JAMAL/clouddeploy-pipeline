@@ -226,23 +226,29 @@ EOF
             }
         }
 
-        stage('Create Dockerfile') {
-            steps {
-                script {
-                    echo '[STAGE_START] Create Dockerfile'
+     stage('Create Dockerfile') {
+    steps {
+        script {
+            echo '[STAGE_START] Create Dockerfile'
 
-                    def df = ''
+            def df = ''
 
-                    switch (env.STACK) {
+            switch (env.STACK) {
 
-                        case 'vite':
-                        case 'react':
-                            df = '''FROM node:20-alpine AS builder
+                case 'vite':
+                case 'react':
+                    df = '''FROM node:20-alpine AS builder
 WORKDIR /app
+
+# 🔥 FIX: copy package files first (fixes npm install crash)
+COPY package*.json ./
+
+# 🔥 FIX: stable install for CI/CD pipelines
+RUN npm install --legacy-peer-deps
+
+# then copy rest of code
 COPY . .
 
-# 🔥 OPTIMIZED (faster + smaller image)
-RUN npm ci --silent --legacy-peer-deps
 RUN npm run build
 
 FROM nginx:alpine
@@ -250,13 +256,15 @@ COPY --from=builder /app/dist /usr/share/nginx/html
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
 '''
-                            break
+                    break
 
-                        case 'nextjs':
-                            df = '''FROM node:20-alpine AS builder
+                case 'nextjs':
+                    df = '''FROM node:20-alpine AS builder
 WORKDIR /app
+COPY package*.json ./
+RUN npm install --legacy-peer-deps
 COPY . .
-RUN npm ci --legacy-peer-deps && npm run build
+RUN npm run build
 
 FROM node:20-alpine
 WORKDIR /app
@@ -267,56 +275,58 @@ RUN npm install --omit=dev
 EXPOSE 3000
 CMD ["npm", "start"]
 '''
-                            break
+                    break
 
-                        case 'node':
-                            df = '''FROM node:20-alpine
+                case 'node':
+                    df = '''FROM node:20-alpine
 WORKDIR /app
+COPY package*.json ./
+RUN npm install --legacy-peer-deps --omit=dev
 COPY . .
-RUN npm ci --omit=dev --legacy-peer-deps
 EXPOSE 3000
 CMD ["node", "index.js"]
 '''
-                            break
+                    break
 
-                        case 'django':
-                            df = '''FROM python:3.11-slim
+                case 'django':
+                    df = '''FROM python:3.11-slim
 WORKDIR /app
 COPY . .
 RUN pip install --no-cache-dir -r requirements.txt
 EXPOSE 8000
 CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
 '''
-                            break
+                    break
 
-                        default:
-                            df = '''FROM node:20-alpine
+                default:
+                    df = '''FROM node:20-alpine
 WORKDIR /app
 COPY . .
 EXPOSE 3000
 CMD ["echo", "Unknown stack"]
 '''
-                    }
-
-                    writeFile file: "${env.PKG_ROOT}/Dockerfile", text: df
-
-                    echo '[META] DOCKERFILE_CREATED=true'
-                    echo '[STAGE_SUCCESS] Create Dockerfile'
-                }
             }
+
+            writeFile file: "${env.PKG_ROOT}/Dockerfile", text: df
+
+            echo '[META] DOCKERFILE_CREATED=true'
+            echo '[STAGE_SUCCESS] Create Dockerfile'
         }
+    }
+}
 
         stage('Build Image') {
-            steps {
-                script { echo '[STAGE_START] Build Image' }
+    steps {
+        script { echo '[STAGE_START] Build Image' }
 
-                sh '''
-                    docker build --network=host -t "${IMAGE_NAME}" "${PKG_ROOT}"
-                '''
+        sh '''
+            cd "${PKG_ROOT}"
+            docker build --network=host -t "${IMAGE_NAME}" .
+        '''
 
-                script { echo '[STAGE_SUCCESS] Build Image' }
-            }
-        }
+        script { echo '[STAGE_SUCCESS] Build Image' }
+    }
+}
 
         stage('Image Scan (Trivy)') {
             steps {
