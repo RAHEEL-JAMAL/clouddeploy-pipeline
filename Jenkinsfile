@@ -73,22 +73,27 @@ pipeline {
             }
         }
 
-        stage('Clone Repo') {
-            steps {
-                script { echo '[STAGE_START] Clone Repo' }
-
-                retry(3) {
-                    sh '''
-                        rm -rf app
-                        git config --global http.version HTTP/1.1
-                        git config --global http.postBuffer 524288000
-                        git clone --depth 1 "${REPO_URL}" app
-                    '''
-                }
-
-                script { echo '[STAGE_SUCCESS] Clone Repo' }
-            }
+       stage('Clone Repo') {
+    steps {
+        script {
+            echo '[STAGE_START] Clone Repo'
         }
+
+        retry(2) {
+            sh '''
+                rm -rf app
+                git config --global http.version HTTP/1.1
+                git config --global http.postBuffer 524288000
+
+                GIT_TERMINAL_PROMPT=0 git clone --depth 1 https://github.com/evertramos/docker-php-app.git app
+            '''
+        }
+
+        script {
+            echo '[STAGE_SUCCESS] Clone Repo'
+        }
+    }
+}
 
         /* =========================
            🔥 ADDED: .dockerignore
