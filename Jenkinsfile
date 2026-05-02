@@ -92,8 +92,8 @@ pipeline {
         }
     }
 }      
-           🔥 ADDED: .dockerignore
-           ========================= */
+        
+        
         stage('Setup Docker Ignore') {
             steps {
                 script {
