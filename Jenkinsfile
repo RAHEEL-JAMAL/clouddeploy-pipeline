@@ -91,7 +91,7 @@ pipeline {
             echo '[STAGE_SUCCESS] Repo Downloaded'
         }
     }
-}==========
+}      
            🔥 ADDED: .dockerignore
            ========================= */
         stage('Setup Docker Ignore') {
