@@ -90,6 +90,33 @@ pipeline {
             }
         }
 
+        /* =========================
+           🔥 ADDED: .dockerignore
+           ========================= */
+        stage('Setup Docker Ignore') {
+            steps {
+                script {
+                    echo '[STAGE_START] Docker Ignore Setup'
+
+                    sh '''
+                        cat > app/.dockerignore <<EOF
+node_modules
+.git
+npm-debug.log
+dist
+build
+.env
+coverage
+.DS_Store
+EOF
+                    '''
+
+                    echo '[META] DOCKERIGNORE_CREATED=true'
+                    echo '[STAGE_SUCCESS] Docker Ignore Setup'
+                }
+            }
+        }
+
         stage('Secret Scan') {
             steps {
                 script {
@@ -190,7 +217,6 @@ pipeline {
                             sh -c "npm install --prefer-offline --no-fund 2>/dev/null; npm audit --json > /work/npm-audit.json 2>&1 || true"
 
                         echo "[META] DEPENDENCY_AUDIT=DONE"
-
                     else
                         echo "[META] DEPENDENCY_AUDIT=SKIPPED"
                     fi
@@ -214,7 +240,10 @@ pipeline {
                             df = '''FROM node:20-alpine AS builder
 WORKDIR /app
 COPY . .
-RUN npm install && npm run build
+
+# 🔥 OPTIMIZED (faster + smaller image)
+RUN npm ci --silent --legacy-peer-deps
+RUN npm run build
 
 FROM nginx:alpine
 COPY --from=builder /app/dist /usr/share/nginx/html
@@ -227,14 +256,14 @@ CMD ["nginx", "-g", "daemon off;"]
                             df = '''FROM node:20-alpine AS builder
 WORKDIR /app
 COPY . .
-RUN npm install && npm run build
+RUN npm ci --legacy-peer-deps && npm run build
 
 FROM node:20-alpine
 WORKDIR /app
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/package.json ./
-RUN npm install
+RUN npm install --omit=dev
 EXPOSE 3000
 CMD ["npm", "start"]
 '''
@@ -244,7 +273,7 @@ CMD ["npm", "start"]
                             df = '''FROM node:20-alpine
 WORKDIR /app
 COPY . .
-RUN npm install
+RUN npm ci --omit=dev --legacy-peer-deps
 EXPOSE 3000
 CMD ["node", "index.js"]
 '''
@@ -254,7 +283,7 @@ CMD ["node", "index.js"]
                             df = '''FROM python:3.11-slim
 WORKDIR /app
 COPY . .
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 EXPOSE 8000
 CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
 '''
@@ -280,7 +309,11 @@ CMD ["echo", "Unknown stack"]
         stage('Build Image') {
             steps {
                 script { echo '[STAGE_START] Build Image' }
-                sh 'docker build -t "${IMAGE_NAME}" "${PKG_ROOT}"'
+
+                sh '''
+                    docker build --network=host -t "${IMAGE_NAME}" "${PKG_ROOT}"
+                '''
+
                 script { echo '[STAGE_SUCCESS] Build Image' }
             }
         }
@@ -288,6 +321,7 @@ CMD ["echo", "Unknown stack"]
         stage('Image Scan (Trivy)') {
             steps {
                 script { echo '[STAGE_START] Image Scan (Trivy)' }
+
                 sh '''
                     docker run --rm \
                         -v /var/run/docker.sock:/var/run/docker.sock \
@@ -295,6 +329,7 @@ CMD ["echo", "Unknown stack"]
                         --severity HIGH,CRITICAL \
                         "${IMAGE_NAME}"
                 '''
+
                 script { echo '[STAGE_SUCCESS] Image Scan (Trivy)' }
             }
         }
@@ -302,11 +337,17 @@ CMD ["echo", "Unknown stack"]
         stage('Push to DockerHub') {
             steps {
                 script { echo '[STAGE_START] Push to DockerHub' }
-                sh '''
-                    echo "${DOCKERHUB_CRED_PSW}" | docker login -u "${DOCKERHUB_CRED_USR}" --password-stdin
-                    docker push "${IMAGE_NAME}"
-                    docker logout
-                '''
+
+                retry(3) {
+                    timeout(time: 15, unit: 'MINUTES') {
+                        sh '''
+                            echo "$DOCKERHUB_CRED_PSW" | docker login -u "$DOCKERHUB_CRED_USR" --password-stdin
+                            docker push "${IMAGE_NAME}"
+                            docker logout
+                        '''
+                    }
+                }
+
                 script { echo '[STAGE_SUCCESS] Push to DockerHub' }
             }
         }
@@ -333,23 +374,15 @@ CMD ["echo", "Unknown stack"]
         stage('Verify') {
             steps {
                 script { echo '[STAGE_START] Verify' }
-                sh '''
-                    docker ps | grep "${CONTAINER_NAME}"
-                '''
+                sh 'docker ps | grep "${CONTAINER_NAME}"'
                 script { echo '[STAGE_SUCCESS] Verify' }
             }
         }
     }
 
     post {
-        success {
-            echo '[DEPLOY_SUCCESS]'
-        }
-        failure {
-            echo '[DEPLOY_FAILED]'
-        }
-        always {
-            echo '[META] Pipeline complete.'
-        }
+        success { echo '[DEPLOY_SUCCESS]' }
+        failure { echo '[DEPLOY_FAILED]' }
+        always { echo '[META] Pipeline complete.' }
     }
 }
